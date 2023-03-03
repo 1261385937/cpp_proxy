@@ -47,7 +47,7 @@ public:
             std::make_tuple(j["log_dir"], j["log_name"], j["log_max_size"], j["log_max_size"]);
 
         connection_buf_size_ = j["connection_buf_size"];
-        for (auto& proxy : j["cpp_proxy"]) {
+        for (auto& proxy : j["tcp_proxy"]) {
             uint16_t listen_port = proxy["listen_port"];
             std::vector<server_info> servers_info;
             for (auto& servers : proxy["servers"]) {
