@@ -21,9 +21,31 @@ using tcp_acceptor = default_token::as_default_on_t<tcp_type::acceptor>;
 using tcp_socket = default_token::as_default_on_t<tcp_type::socket>;
 using tcp_endpoint = tcp_type::endpoint;
 
-enum class direction : uint8_t {
+#ifdef _WIN32
+constexpr char unix_domian_ip[] = "./cpp_proxy_uds";
+#else
+constexpr char unix_domian_ip[] = "/dev/shm/cpp_proxy_uds";
+#endif
+constexpr uint16_t local_port = 23456;
+
+enum class data_type : uint8_t {
     from_client_to_server,
-    from_server_to_client
+    from_server_to_client,
+    four_tuple
+};
+
+enum class action : uint8_t {
+    pass,
+    block
+};
+
+struct response_head {
+    data_type type;
+    action act;
+    uint8_t unused2;
+    uint8_t unused3;
+    uint32_t new_data_len;
+    uint64_t handled_total_pkg_len;
 };
 
 }  // namespace local
