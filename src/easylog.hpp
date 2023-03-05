@@ -133,7 +133,7 @@ private:
       sinks.push_back(file_sink);
 
       auto err_sink = std::make_shared<spdlog::sinks::stderr_color_sink_mt>();
-      err_sink->set_level(spdlog::level::warn);
+      err_sink->set_level(spdlog::level::info);
       sinks.push_back(err_sink);
 
       return sinks;
