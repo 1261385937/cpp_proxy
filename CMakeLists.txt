@@ -47,37 +47,6 @@ include_directories(${PROJECT_SOURCE_DIR}/3party/spdlog-1.9.2/include)
 include_directories(${PROJECT_SOURCE_DIR}/3party/asio-1.24.0/include)
 include_directories(${PROJECT_SOURCE_DIR}/3party/json-3.10.5/include)
 
-
-file(GLOB_RECURSE src_files src/*.cpp src/*.h src/*.hpp)
-
-#source_group(app  src/main.cpp)
-#source_group(util src/util)
-#source_group(client src/client)
-#source_group(controller src/controller)
-#source_group(capture src/capture)
-
-source_group(TREE ${CMAKE_SOURCE_DIR} FILES ${src_files})
-
-add_executable(${PROJECT_NAME} ${src_files}) 
-
-if (MSVC)
-    target_compile_options(${PROJECT_NAME}
-        PRIVATE
-        $<$<CXX_COMPILER_ID:MSVC>:/bigobj>
-    )
-
-    target_link_libraries(${PROJECT_NAME} Crypt32 IPHLPAPI)
-    # add_custom_command(
-    #     TARGET ${PROJECT_NAME} POST_BUILD
-    #     COMMAND ${CMAKE_COMMAND} -E copy_if_different
-    #     "${PROJECT_SOURCE_DIR}/3party/npcap-sdk-1.12/Lib/x64/Packet.dll"
-    #     "${PROJECT_SOURCE_DIR}/3party/npcap-sdk-1.12/Lib/x64/wpcap.dll"
-    #     $<TARGET_FILE_DIR:new_pcap_agent>
-    # )
-
-    #set_target_properties(${PROJECT_NAME} PROPERTIES LINK_FLAGS " /MANIFESTUAC:\"level='requireAdministrator' uiAccess='false'\" ")
-    
-else ()
-    target_link_libraries(${PROJECT_NAME} -static-libgcc -static-libstdc++ dl pthread)
-endif ()
+add_subdirectory(src/cpp_proxy)
+add_subdirectory(src/process)
 
