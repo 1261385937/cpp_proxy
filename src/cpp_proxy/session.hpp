@@ -315,6 +315,11 @@ private:
    }
 
    asio::awaitable<int> enable_bypass() {
+      if (bypass_) {
+         co_return 0;
+      }
+
+      LOG_WARN("enable bypass");
       bypass_ = true;
       auto ret = co_await transfer_client_data_and_reconnect();
       if (ret == -1) [[unlikely]] {
@@ -342,12 +347,12 @@ private:
             if (eof_) {
                co_return;
             }
-            LOG_ERROR("enable bypass, async_read head from process error: {}", rec.message());
+            LOG_ERROR("async_read head from process error: {}", rec.message());
             enable_bypass();
             co_return;
          }
          auto head = (local::response_head*)head_buf;
-         //LOG_INFO("head:{} body_len: {}", head->type, head->new_data_len);
+         // LOG_INFO("head:{} body_len: {}", head->type, head->new_data_len);
 
          //**Read body if has
          auto body_len = head->new_data_len;
@@ -361,7 +366,7 @@ private:
                if (eof_) {
                   co_return;
                }
-               LOG_ERROR("enable bypass, async_read body from process error: {}", ec.message());
+               LOG_ERROR("async_read body from process error: {}", ec.message());
                enable_bypass();
                co_return;
             }
@@ -513,8 +518,7 @@ private:
             co_return;
          }
 
-         // ret is -2
-         LOG_WARN("process error, enable bypass");
+         // ret is -2, proxy write data to process error
          ret = co_await enable_bypass();
          if (ret == 0) [[likely]] {
             continue;
@@ -646,8 +650,7 @@ private:
             co_return;
          }
 
-         // ret is -2
-         LOG_WARN("process error, enable bypass");
+         // ret is -2, proxy write data to process error
          ret = co_await enable_bypass();
          if (ret == 0) [[likely]] {
             continue;
