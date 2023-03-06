@@ -52,7 +52,6 @@ private:
    std::deque<packet> data_from_server_to_client_;
    uint64_t req_handled_total_pkg_len_ = 0;
    uint64_t res_handled_total_pkg_len_ = 0;
-   std::shared_ptr<data_block> block_ = nullptr;
 
    std::string server_ip_;
    uint16_t server_port_{};
@@ -173,6 +172,7 @@ private:
          auto [ec] = co_await proxy_process_socket_.async_connect(endpoint);
          if (!ec) {
             LOG_INFO("connect_process ok");
+            reconnecting_ = false;
 
             auto str = make_four_tuple();
             uint32_t len = (uint32_t)str.length();
@@ -314,6 +314,19 @@ private:
       co_return 0;
    }
 
+   asio::awaitable<int> enable_bypass() {
+      bypass_ = true;
+      auto ret = co_await transfer_client_data_and_reconnect();
+      if (ret == -1) [[unlikely]] {
+         co_return -1;
+      }
+      ret = co_await transfer_server_data_and_reconnect();
+      if (ret == -1) [[unlikely]] {
+         co_return -1;
+      }
+      co_return 0;
+   }
+
    asio::awaitable<void> process_2proxy_2client_or_2server() {
       // Connect process ok, then disable bypass
       bypass_ = false;
@@ -330,13 +343,11 @@ private:
                co_return;
             }
             LOG_ERROR("enable bypass, async_read head from process error: {}", rec.message());
-            bypass_ = true;
-            co_await transfer_client_data_and_reconnect();
-            co_await transfer_server_data_and_reconnect();
+            enable_bypass();
             co_return;
          }
          auto head = (local::response_head*)head_buf;
-         // LOG_INFO("head:{} body_len: {}", head->type, head->new_data_len);
+         //LOG_INFO("head:{} body_len: {}", head->type, head->new_data_len);
 
          //**Read body if has
          auto body_len = head->new_data_len;
@@ -351,9 +362,7 @@ private:
                   co_return;
                }
                LOG_ERROR("enable bypass, async_read body from process error: {}", ec.message());
-               bypass_ = true;
-               co_await transfer_client_data_and_reconnect();
-               co_await transfer_server_data_and_reconnect();
+               enable_bypass();
                co_return;
             }
          }
@@ -406,14 +415,14 @@ private:
       co_return 0;
    }
 
-   asio::awaitable<int> client_2proxy_2process() {
+   asio::awaitable<int> client_2proxy_2process(std::shared_ptr<data_block>& block) {
       // Prepare data_block if available size < 64+5 byte, head_len is 5
       // For head(1 + 4) byte
-      if (!block_ || block_->get_available() < 69) {
-         block_ = std::make_shared<data_block>(default_block_size);
+      if (!block || block->get_available() < 69) {
+         block = std::make_shared<data_block>(default_block_size);
       }
-      auto data_pos = block_->get_current_write_pos();
-      auto available = block_->get_available();
+      auto data_pos = block->get_current_write_pos();
+      auto available = block->get_available();
 
       // Proxy read data from client
       auto [rec, n] =
@@ -430,8 +439,8 @@ private:
          }
       }
       // Store the packet from client for bypass if need
-      block_->update_available((uint32_t)n + 5);
-      data_from_client_to_server_.emplace_back(packet{data_pos + 5, (uint32_t)n, block_});
+      block->update_available((uint32_t)n + 5);
+      data_from_client_to_server_.emplace_back(packet{data_pos + 5, (uint32_t)n, block});
 
       // Proxy write data to process
       *(uint8_t*)data_pos = (uint8_t)local::data_type::from_client_to_server;
@@ -478,6 +487,7 @@ private:
    }
 
    asio::awaitable<void> client_request() {
+      std::shared_ptr<data_block> block = nullptr;
       for (;;) {
          if (eof_) [[unlikely]] {
             LOG_INFO("remote peer (client) close the connection");
@@ -495,7 +505,7 @@ private:
          }
 
          // ***Here, data from client to process
-         auto ret = co_await client_2proxy_2process();
+         auto ret = co_await client_2proxy_2process(block);
          if (ret == 0) [[likely]] {
             continue;
          }
@@ -505,8 +515,7 @@ private:
 
          // ret is -2
          LOG_WARN("process error, enable bypass");
-         bypass_ = true;
-         ret = co_await transfer_client_data_and_reconnect();
+         ret = co_await enable_bypass();
          if (ret == 0) [[likely]] {
             continue;
          }
@@ -540,13 +549,13 @@ private:
       co_return 0;
    }
 
-   asio::awaitable<int> server_2proxy_2process() {
+   asio::awaitable<int> server_2proxy_2process(std::shared_ptr<data_block>& block) {
       // Prepare data_block if available size < 64+5 byte, head_len is 5
-      if (!block_ || block_->get_available() < 69) {
-         block_ = std::make_shared<data_block>(default_block_size);
+      if (!block || block->get_available() < 69) {
+         block = std::make_shared<data_block>(default_block_size);
       }
-      auto data_pos = block_->get_current_write_pos();
-      auto available = block_->get_available();
+      auto data_pos = block->get_current_write_pos();
+      auto available = block->get_available();
 
       // Proxy read data from server, (data_pos + 5) for head(1 + 4) byte
       auto [rec, n] =
@@ -563,8 +572,8 @@ private:
          }
       }
       // Store the packet from server for bypass if need
-      block_->update_available((uint32_t)n + 5);
-      data_from_server_to_client_.emplace_back(packet{data_pos + 5, (uint32_t)n, block_});
+      block->update_available((uint32_t)n + 5);
+      data_from_server_to_client_.emplace_back(packet{data_pos + 5, (uint32_t)n, block});
 
       // Proxy write data to process
       *(uint8_t*)data_pos = (uint8_t)local::data_type::from_server_to_client;
@@ -611,6 +620,7 @@ private:
    }
 
    asio::awaitable<void> server_response() {
+      std::shared_ptr<data_block> block = nullptr;
       for (;;) {
          if (eof_) [[unlikely]] {
             LOG_INFO("remote peer (server) close the connection");
@@ -628,7 +638,7 @@ private:
          }
 
          // ***Here, data from server to process
-         auto ret = co_await server_2proxy_2process();
+         auto ret = co_await server_2proxy_2process(block);
          if (ret == 0) [[likely]] {
             continue;
          }
@@ -638,8 +648,7 @@ private:
 
          // ret is -2
          LOG_WARN("process error, enable bypass");
-         bypass_ = true;
-         ret = co_await transfer_server_data_and_reconnect();
+         ret = co_await enable_bypass();
          if (ret == 0) [[likely]] {
             continue;
          }
