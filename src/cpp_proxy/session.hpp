@@ -42,6 +42,7 @@ private:
    bool eof_ = false;
    bool reconnecting_ = false;
    bool bypass_ = true;
+   bool response_bypass_ = true;
 
    std::string proxy_client_buf_;
    std::string proxy_server_buf_;
@@ -168,7 +169,7 @@ private:
 #ifndef UDS
       local::tcp_endpoint endpoint(asio::ip::address{}.from_string("127.0.0.1"), local::local_port);
 #else
-      local::tcp_endpoint endpoint(local::unix_domian_ip)
+      local::tcp_endpoint endpoint(local::unix_domian_ip);
 #endif
 
       for (; !eof_;) {
@@ -235,8 +236,8 @@ private:
       pkg.len -= next_pkg_used_size;
    }
 
-   asio::awaitable<int> enable_bypass(std::deque<packet>& stored_data, tcp_socket& socket,
-                                      const std::string& direction) {
+   asio::awaitable<int> inner_enable_bypass(std::deque<packet>& stored_data, tcp_socket& socket,
+                                            const std::string& direction) {
       if (!bypass_) {
          bypass_ = true;
          LOG_WARN("enable bypass. client: {}:{} --- proxy: {}:{} --- server: {}:{}", client_ip_,
@@ -275,20 +276,21 @@ private:
    }
 
    asio::awaitable<int> enable_bypass_2server() {
-      co_return co_await enable_bypass(data_from_client_to_server_, proxy_server_socket_,
-                                       "to server");
+      co_return co_await inner_enable_bypass(data_from_client_to_server_, proxy_server_socket_,
+                                             "to server");
    }
 
    asio::awaitable<int> enable_bypass_2client() {
-      co_return co_await enable_bypass(data_from_server_to_client_, proxy_client_socket_,
-                                       "to client");
+      co_return co_await inner_enable_bypass(data_from_server_to_client_, proxy_client_socket_,
+                                             "to client");
    }
 
-   asio::awaitable<int> proxy_2client_or_2server(local::response_head* head,
-                                                 std::string_view proxy_process_buf,
-                                                 std::deque<packet>& stored_data,
-                                                 uint64_t& handled_total_pkg_len,
-                                                 tcp_socket& socket, const std::string& direction) {
+   asio::awaitable<int> inner_proxy_2client_or_2server(local::response_head* head,
+                                                       std::string_view proxy_process_buf,
+                                                       std::deque<packet>& stored_data,
+                                                       uint64_t& handled_total_pkg_len,
+                                                       tcp_socket& socket,
+                                                       const std::string& direction) {
       // Process make a new data (rewrite or create), transfer the new data
       if (head->new_data_len != 0) {
          auto [ec, _] = co_await asio::async_write(
@@ -329,16 +331,70 @@ private:
 
    asio::awaitable<int> proxy_2client(local::response_head* head,
                                       std::string_view proxy_process_buf) {
-      co_return co_await proxy_2client_or_2server(
+      co_return co_await inner_proxy_2client_or_2server(
           head, proxy_process_buf, data_from_server_to_client_, res_handled_total_pkg_len_,
-          proxy_client_socket_, "to client");
+          proxy_client_socket_, "2client");
    }
 
    asio::awaitable<int> proxy_2server(local::response_head* head,
                                       std::string_view proxy_process_buf) {
-      co_return co_await proxy_2client_or_2server(
+      co_return co_await inner_proxy_2client_or_2server(
           head, proxy_process_buf, data_from_client_to_server_, req_handled_total_pkg_len_,
-          proxy_server_socket_, "to server");
+          proxy_server_socket_, "2server");
+   }
+
+   asio::awaitable<int> inner_client_or_server_2proxy_2process(std::shared_ptr<data_block>& block,
+                                                               std::deque<packet>& stored_data,
+                                                               tcp_socket& socket,
+                                                               local::data_type type,
+                                                               const std::string& direction) {
+      // Prepare data_block if available size < 64+5 byte, head_len is 5
+      // For head(1 + 4) byte
+      if (!block || block->get_available() < 69) {
+         block = std::make_shared<data_block>(default_block_size);
+      }
+      auto data_pos = block->get_current_write_pos();
+      auto available = block->get_available();
+
+      // Proxy read data from client/server
+      auto [rec, n] = co_await socket.async_read_some(asio::buffer(data_pos + 5, available - 5));
+      if (rec) [[unlikely]] {
+         if (rec != asio::error::eof) {
+            LOG_ERROR("async_read_some " + direction + " error: {}", rec.message());
+            grace_close();
+            co_return -1;
+         }
+         eof_ = true;
+         if (n == 0) {
+            co_return 0;
+         }
+      }
+      // Store the packet from client for bypass if need
+      block->update_available((uint32_t)n + 5);
+      stored_data.emplace_back(packet{data_pos + 5, (uint32_t)n, block});
+
+      // Proxy write data to process
+      *(uint8_t*)data_pos = (uint8_t)type;
+      *(uint32_t*)(data_pos + 1) = static_cast<uint32_t>(n);
+      auto [ec, _] =
+          co_await asio::async_write(proxy_process_socket_, asio::buffer(data_pos, n + 5));
+      if (ec) [[unlikely]] {
+         LOG_ERROR("async_write to process error: {}", ec.message());
+         co_return -2;
+      }
+      co_return 0;
+   }
+
+   asio::awaitable<int> client_2proxy_2process(std::shared_ptr<data_block>& block) {
+      co_return co_await inner_client_or_server_2proxy_2process(
+          block, data_from_client_to_server_, proxy_client_socket_,
+          local::data_type::from_client_to_server, "from client");
+   }
+
+   asio::awaitable<int> server_2proxy_2process(std::shared_ptr<data_block>& block) {
+      co_return co_await inner_client_or_server_2proxy_2process(
+          block, data_from_server_to_client_, proxy_server_socket_,
+          local::data_type::from_server_to_client, "from server");
    }
 
    asio::awaitable<void> process_2proxy_2client_or_2server() {
@@ -433,45 +489,6 @@ private:
       co_return 0;
    }
 
-   asio::awaitable<int> client_2proxy_2process(std::shared_ptr<data_block>& block) {
-      // Prepare data_block if available size < 64+5 byte, head_len is 5
-      // For head(1 + 4) byte
-      if (!block || block->get_available() < 69) {
-         block = std::make_shared<data_block>(default_block_size);
-      }
-      auto data_pos = block->get_current_write_pos();
-      auto available = block->get_available();
-
-      // Proxy read data from client
-      auto [rec, n] =
-          co_await proxy_client_socket_.async_read_some(asio::buffer(data_pos + 5, available - 5));
-      if (rec) [[unlikely]] {
-         if (rec != asio::error::eof) {
-            LOG_ERROR("async_read_some from client error: {}", rec.message());
-            grace_close();
-            co_return -1;
-         }
-         eof_ = true;
-         if (n == 0) {
-            co_return 0;
-         }
-      }
-      // Store the packet from client for bypass if need
-      block->update_available((uint32_t)n + 5);
-      data_from_client_to_server_.emplace_back(packet{data_pos + 5, (uint32_t)n, block});
-
-      // Proxy write data to process
-      *(uint8_t*)data_pos = (uint8_t)local::data_type::from_client_to_server;
-      *(uint32_t*)(data_pos + 1) = static_cast<uint32_t>(n);
-      auto [ec, _] =
-          co_await asio::async_write(proxy_process_socket_, asio::buffer(data_pos, n + 5));
-      if (ec) [[unlikely]] {
-         LOG_ERROR("async_write to process error: {}", ec.message());
-         co_return -2;
-      }
-      co_return 0;
-   }
-
    asio::awaitable<void> client_request() {
       std::shared_ptr<data_block> block = nullptr;
       for (;;) {
@@ -534,44 +551,6 @@ private:
       co_return 0;
    }
 
-   asio::awaitable<int> server_2proxy_2process(std::shared_ptr<data_block>& block) {
-      // Prepare data_block if available size < 64+5 byte, head_len is 5
-      if (!block || block->get_available() < 69) {
-         block = std::make_shared<data_block>(default_block_size);
-      }
-      auto data_pos = block->get_current_write_pos();
-      auto available = block->get_available();
-
-      // Proxy read data from server, (data_pos + 5) for head(1 + 4) byte
-      auto [rec, n] =
-          co_await proxy_server_socket_.async_read_some(asio::buffer(data_pos + 5, available - 5));
-      if (rec) [[unlikely]] {
-         if (rec != asio::error::eof) {
-            LOG_ERROR("proxy async_read_some from server: {}", rec.message());
-            grace_close();
-            co_return -1;
-         }
-         eof_ = true;
-         if (n == 0) {
-            co_return 0;
-         }
-      }
-      // Store the packet from server for bypass if need
-      block->update_available((uint32_t)n + 5);
-      data_from_server_to_client_.emplace_back(packet{data_pos + 5, (uint32_t)n, block});
-
-      // Proxy write data to process
-      *(uint8_t*)data_pos = (uint8_t)local::data_type::from_server_to_client;
-      *(uint32_t*)(data_pos + 1) = static_cast<uint32_t>(n);
-      auto [ec, _] =
-          co_await asio::async_write(proxy_process_socket_, asio::buffer(data_pos, n + 5));
-      if (ec) [[unlikely]] {
-         LOG_ERROR("async_write to process error: {}", ec.message());
-         co_return -2;
-      }
-      co_return 0;
-   }
-
    asio::awaitable<void> server_response() {
       std::shared_ptr<data_block> block = nullptr;
       for (;;) {
@@ -582,7 +561,8 @@ private:
          }
 
          // ***Here bypass, data from server to client
-         if (bypass_) [[unlikely]] {
+         // default response_bypass_ is true;
+         if (bypass_ || response_bypass_) {
             auto ret = co_await server_2proxy_2client();
             if (ret == 0) [[likely]] {
                continue;
