@@ -13,6 +13,7 @@ asio::awaitable<void> listener(uint16_t listen_port, ExecutorPool&& pool) {
 
    auto executor = co_await asio::this_coro::executor;
    tcp_acceptor acceptor(executor, {tcp::v6(), listen_port});
+   acceptor.set_option(tcp::acceptor::reuse_address(true));
 
    for (;;) {
       tcp::socket proxy_server_socket(pool.get_executor());
@@ -39,7 +40,7 @@ int main() {
    LOG_WARN("cpp_proxy start");
 
    try {
-      io_context_pool icp(1);
+      io_context_pool icp(std::thread::hardware_concurrency());
       icp.start();
 
       asio::io_context io_context;

@@ -104,7 +104,7 @@ private:
 
                std::vector<asio::const_buffer> write_buffers;
                write_buffers.emplace_back(asio::buffer(&req_head, sizeof(req_head)));
-               //write_buffers.emplace_back(asio::buffer(buf_.data(), body_len));
+               // write_buffers.emplace_back(asio::buffer(buf_.data(), body_len));
 
                auto [wec, w_] = co_await asio::async_write(socket_, write_buffers);
                if (wec) [[unlikely]] {
@@ -123,7 +123,7 @@ private:
 
                std::vector<asio::const_buffer> write_buffers;
                write_buffers.emplace_back(asio::buffer(&res_head, sizeof(res_head)));
-               //write_buffers.emplace_back(asio::buffer(buf_.data(), body_len));
+               // write_buffers.emplace_back(asio::buffer(buf_.data(), body_len));
 
                auto [wec, w_] = co_await asio::async_write(socket_, write_buffers);
                if (wec) [[unlikely]] {
@@ -155,6 +155,7 @@ asio::awaitable<void> listener(ExecutorPool&& pool) {
    for (;;) {
       local::tcp_socket socket(pool.get_executor());
       auto [ec] = co_await acceptor.async_accept(socket);
+      acceptor.set_option(tcp_type::acceptor::reuse_address(true));
       if (ec) {
          continue;
       }
