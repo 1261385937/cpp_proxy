@@ -1,6 +1,6 @@
 #pragma once
 
-// #define UDS
+#define UDS
 #ifdef UDS
 #include "asio/local/stream_protocol.hpp"
 #endif
