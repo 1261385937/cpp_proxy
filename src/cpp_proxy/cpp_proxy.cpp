@@ -39,7 +39,7 @@ int main() {
    LOG_WARN("cpp_proxy start");
 
    try {
-      io_context_pool icp(std::thread::hardware_concurrency());
+      io_context_pool icp(1);
       icp.start();
 
       asio::io_context io_context;

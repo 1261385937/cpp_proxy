@@ -20,6 +20,9 @@
 
 namespace cpp_proxy {
 
+struct client2server {};
+struct server2client {};
+
 using asio::ip::tcp;
 
 class session : public std::enable_shared_from_this<session> {
@@ -232,14 +235,66 @@ private:
       pkg.len -= next_pkg_used_size;
    }
 
-   asio::awaitable<int> proxy_2client(local::response_head* head,
-                                      std::string_view proxy_process_buf) {
+   asio::awaitable<int> enable_bypass(std::deque<packet>& stored_data, tcp_socket& socket,
+                                      const std::string& direction) {
+      if (!bypass_) {
+         bypass_ = true;
+         LOG_WARN("enable bypass. client: {}:{} --- proxy: {}:{} --- server: {}:{}", client_ip_,
+                  client_port_, proxy_ip_, proxy_port_, server_ip_, server_port_);
+      }
+
+      // Try to reconnect process, then disable bypass if reconnect ok
+      if (!reconnecting_) {
+         reconnecting_ = true;
+         LOG_ERROR("try to reconnect process");
+         auto executor = co_await asio::this_coro::executor;
+         asio::co_spawn(
+             executor, [self = shared_from_this()] { return self->connect_process(); },
+             asio::detached);
+      }
+
+      // Transfer the all data to client/server in stored_data
+      if (stored_data.empty()) {
+         co_return 0;
+      }
+
+      std::vector<asio::const_buffer> write_buffers;
+      write_buffers.reserve(stored_data.size());
+      for (size_t i = 0; i < stored_data.size(); ++i) {
+         auto& pack = stored_data[i];
+         write_buffers.emplace_back(asio::buffer(pack.buf, pack.len));
+      }
+      auto [wec, w_] = co_await asio::async_write(socket, write_buffers);
+      if (wec) [[unlikely]] {
+         LOG_ERROR("async_write " + direction + " error: {}", wec.message());
+         grace_close();
+         co_return -1;
+      }
+      stored_data.clear();
+      co_return 0;
+   }
+
+   asio::awaitable<int> enable_bypass_2server() {
+      co_return co_await enable_bypass(data_from_client_to_server_, proxy_server_socket_,
+                                       "to server");
+   }
+
+   asio::awaitable<int> enable_bypass_2client() {
+      co_return co_await enable_bypass(data_from_server_to_client_, proxy_client_socket_,
+                                       "to client");
+   }
+
+   asio::awaitable<int> proxy_2client_or_2server(local::response_head* head,
+                                                 std::string_view proxy_process_buf,
+                                                 std::deque<packet>& stored_data,
+                                                 uint64_t& handled_total_pkg_len,
+                                                 tcp_socket& socket, const std::string& direction) {
       // Process make a new data (rewrite or create), transfer the new data
       if (head->new_data_len != 0) {
          auto [ec, _] = co_await asio::async_write(
-             proxy_client_socket_, asio::buffer(proxy_process_buf.data(), head->new_data_len));
+             socket, asio::buffer(proxy_process_buf.data(), head->new_data_len));
          if (ec) {
-            LOG_ERROR("proxy async_write to client error: {}", ec.message());
+            LOG_ERROR("async_write " + direction + " error: {}", ec.message());
             grace_close();
             co_return -1;
          }
@@ -256,85 +311,41 @@ private:
       // Calculate the handled packet count and the tail in next packet
       int handled_pkg_count = 0;
       int next_pkg_used_size = 0;
-      auto write_buffers =
-          prepare_transfer_packet(head, data_from_server_to_client_, res_handled_total_pkg_len_,
-                                  handled_pkg_count, next_pkg_used_size);
+      auto write_buffers = prepare_transfer_packet(head, stored_data, handled_total_pkg_len,
+                                                   handled_pkg_count, next_pkg_used_size);
 
       // Transfer the handled data
-      auto [wec, w_] = co_await asio::async_write(proxy_client_socket_, write_buffers);
+      auto [wec, w_] = co_await asio::async_write(socket, write_buffers);
       if (wec) [[unlikely]] {
-         LOG_ERROR("proxy async_write to client error: {}", wec.message());
+         LOG_ERROR("async_write " + direction + " error: {}", wec.message());
          grace_close();
          co_return -1;
       }
 
       // clear the handled data
-      clear_handled_data(data_from_server_to_client_, handled_pkg_count, next_pkg_used_size);
+      clear_handled_data(stored_data, handled_pkg_count, next_pkg_used_size);
       co_return 0;
+   }
+
+   asio::awaitable<int> proxy_2client(local::response_head* head,
+                                      std::string_view proxy_process_buf) {
+      co_return co_await proxy_2client_or_2server(
+          head, proxy_process_buf, data_from_server_to_client_, res_handled_total_pkg_len_,
+          proxy_client_socket_, "to client");
    }
 
    asio::awaitable<int> proxy_2server(local::response_head* head,
                                       std::string_view proxy_process_buf) {
-      // Process make a new data (rewrite or create), transfer the new data
-      if (head->new_data_len != 0) {
-         auto [ec, _] = co_await asio::async_write(
-             proxy_server_socket_, asio::buffer(proxy_process_buf.data(), head->new_data_len));
-         if (ec) [[unlikely]] {
-            LOG_ERROR("proxy async_write to server error: {}", ec.message());
-            grace_close();
-            co_return -1;
-         }
-      }
-      // Get block action
-      if (head->act == local::action::block) {
-         LOG_WARN("get block action, close all connections");
-         grace_close();
-         co_return -1;
-      }
-
-      // Get pass action
-      //
-      // Calculate the handled packet count and the tail in next packet
-      int handled_pkg_count = 0;
-      int next_pkg_used_size = 0;
-      auto write_buffers =
-          prepare_transfer_packet(head, data_from_client_to_server_, req_handled_total_pkg_len_,
-                                  handled_pkg_count, next_pkg_used_size);
-
-      // Transfer the handled data
-      auto [wec, w_] = co_await asio::async_write(proxy_server_socket_, write_buffers);
-      if (wec) [[unlikely]] {
-         LOG_ERROR("proxy async_write to server error: {}", wec.message());
-         grace_close();
-         co_return -1;
-      }
-
-      // clear the handled data
-      clear_handled_data(data_from_client_to_server_, handled_pkg_count, next_pkg_used_size);
-      co_return 0;
-   }
-
-   asio::awaitable<int> enable_bypass() {
-      if (bypass_) {
-         co_return 0;
-      }
-
-      LOG_WARN("enable bypass");
-      bypass_ = true;
-      auto ret = co_await transfer_client_data_and_reconnect();
-      if (ret == -1) [[unlikely]] {
-         co_return -1;
-      }
-      ret = co_await transfer_server_data_and_reconnect();
-      if (ret == -1) [[unlikely]] {
-         co_return -1;
-      }
-      co_return 0;
+      co_return co_await proxy_2client_or_2server(
+          head, proxy_process_buf, data_from_client_to_server_, req_handled_total_pkg_len_,
+          proxy_server_socket_, "to server");
    }
 
    asio::awaitable<void> process_2proxy_2client_or_2server() {
       // Connect process ok, then disable bypass
       bypass_ = false;
+      LOG_WARN("disable bypass. client: {}:{} --- proxy: {}:{} --- server: {}:{}", client_ip_,
+               client_port_, proxy_ip_, proxy_port_, server_ip_, server_port_);
       std::string proxy_process_buf;
 
       // Proxy read data from process
@@ -348,7 +359,8 @@ private:
                co_return;
             }
             LOG_ERROR("async_read head from process error: {}", rec.message());
-            enable_bypass();
+            co_await enable_bypass_2server();
+            co_await enable_bypass_2client();
             co_return;
          }
          auto head = (local::response_head*)head_buf;
@@ -367,7 +379,8 @@ private:
                   co_return;
                }
                LOG_ERROR("async_read body from process error: {}", ec.message());
-               enable_bypass();
+               co_await enable_bypass_2server();
+               co_await enable_bypass_2client();
                co_return;
             }
          }
@@ -459,38 +472,6 @@ private:
       co_return 0;
    }
 
-   asio::awaitable<int> transfer_client_data_and_reconnect() {
-      // Transfer the all data to server in data_from_client_to_server_
-      if (data_from_client_to_server_.empty()) {
-         co_return 0;
-      }
-
-      std::vector<asio::const_buffer> write_buffers;
-      write_buffers.reserve(data_from_client_to_server_.size());
-      for (size_t i = 0; i < data_from_client_to_server_.size(); ++i) {
-         auto& pack = data_from_client_to_server_[i];
-         write_buffers.emplace_back(asio::buffer(pack.buf, pack.len));
-      }
-      auto [wec, w_] = co_await asio::async_write(proxy_server_socket_, write_buffers);
-      if (wec) [[unlikely]] {
-         LOG_ERROR("async_write to server error: {}", wec.message());
-         grace_close();
-         co_return -1;
-      }
-      data_from_client_to_server_.clear();
-
-      // Try to reconnect process, then disable bypass if reconnect ok
-      if (!reconnecting_) {
-         reconnecting_ = true;
-         LOG_ERROR("try to reconnect process");
-         auto executor = co_await asio::this_coro::executor;
-         asio::co_spawn(
-             executor, [self = shared_from_this()] { return self->connect_process(); },
-             asio::detached);
-      }
-      co_return 0;
-   }
-
    asio::awaitable<void> client_request() {
       std::shared_ptr<data_block> block = nullptr;
       for (;;) {
@@ -519,7 +500,7 @@ private:
          }
 
          // ret is -2, proxy write data to process error
-         ret = co_await enable_bypass();
+         ret = co_await enable_bypass_2server();
          if (ret == 0) [[likely]] {
             continue;
          }
@@ -591,38 +572,6 @@ private:
       co_return 0;
    }
 
-   asio::awaitable<int> transfer_server_data_and_reconnect() {
-      // Transfer the all data to client in data_from_server_to_client_
-      if (data_from_server_to_client_.empty()) {
-         co_return 0;
-      }
-
-      std::vector<asio::const_buffer> write_buffers;
-      write_buffers.reserve(data_from_server_to_client_.size());
-      for (size_t i = 0; i < data_from_server_to_client_.size(); ++i) {
-         auto& pack = data_from_server_to_client_.front();
-         data_from_server_to_client_.pop_front();
-         write_buffers.emplace_back(asio::buffer(pack.buf, pack.len));
-      }
-      auto [wec, w_] = co_await asio::async_write(proxy_client_socket_, write_buffers);
-      if (wec) [[unlikely]] {
-         LOG_ERROR("async_write to client error: {}", wec.message());
-         grace_close();
-         co_return -1;
-      }
-
-      // Try to reconnect process, then disable bypass if reconnect ok
-      if (!reconnecting_) {
-         reconnecting_ = true;
-         LOG_ERROR("try to reconnect process");
-         auto executor = co_await asio::this_coro::executor;
-         asio::co_spawn(
-             executor, [self = shared_from_this()] { return self->connect_process(); },
-             asio::detached);
-      }
-      co_return 0;
-   }
-
    asio::awaitable<void> server_response() {
       std::shared_ptr<data_block> block = nullptr;
       for (;;) {
@@ -651,7 +600,7 @@ private:
          }
 
          // ret is -2, proxy write data to process error
-         ret = co_await enable_bypass();
+         ret = co_await enable_bypass_2client();
          if (ret == 0) [[likely]] {
             continue;
          }
