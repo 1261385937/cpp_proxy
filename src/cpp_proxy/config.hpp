@@ -1,4 +1,5 @@
 #pragma once
+#include <atomic>
 #include <filesystem>
 #include <memory>
 #include <string>
@@ -12,6 +13,34 @@
 #endif
 
 namespace cpp_proxy {
+
+template <size_t UpDepth = 0>
+inline std::string get_executable_path() {
+   // the lengh is enough
+   constexpr size_t len = 2048;
+   char full_path[len]{};
+   std::string_view path;
+#ifdef _WIN32
+   GetModuleFileNameA(nullptr, full_path, len);
+   char split_ident = R"(\)";
+#else
+   readlink("/proc/self/exe", full_path, len);
+   char split_ident = R"(/)";
+#endif
+   path = full_path;
+   path = path.substr(0, path.find_last_of(split_ident) + 1);
+   if constexpr (UpDepth == 0) {
+      return std::string{path.data(), path.length()};
+   }
+   else {
+      for (size_t i = 0; i < UpDepth; i++) {
+         path = path.substr(0, path.length() - 1);
+         path = path.substr(0, path.find_last_of(split_ident) + 1);
+      }
+      return std::string{path.data(), path.length()};
+   }
+}
+
 struct server_info {
    std::string ip;
    uint16_t port;
@@ -22,11 +51,23 @@ struct server_info {
    }
 };
 
+struct log_info {
+#ifndef _WIN32
+   std::string log_dir = "/var/log/cpp_proxy/";
+#else
+   std::string log_dir = get_executable_path() + "/log/";
+#endif
+   std::string log_name = "cpp_proxy";
+   uint32_t log_max_files = 10;
+   uint32_t log_max_size = 10 * 1024 * 1024;
+};
+
 class config {
 private:
    std::unordered_map<uint16_t, std::vector<server_info>> proxy_info_;
-   std::tuple<std::string, std::string, int, int> log_info_;
-   size_t connection_buf_size_ = 8192;
+   log_info log_info_;
+   std::atomic<size_t> connection_buf_size_ = 8192;
+   std::string conf_path_;
 
 public:
    static auto& instance() {
@@ -34,18 +75,31 @@ public:
       return c;
    }
 
-   void parse_conf() {
-      auto conf_path = get_executable_path() + "cpp_proxy.json";
-      auto file_size = std::filesystem::file_size(conf_path);
+   void parse_conf(std::string_view conf_path) {
+      conf_path_ = conf_path;
+      auto file_size = std::filesystem::file_size(conf_path_);
       auto file = fopen(conf_path.data(), "rb");
       std::string content(file_size, '\0');
       fread(content.data(), content.length(), 1, file);
       fclose(file);
-
       auto j = nlohmann::json::parse(content);
-      log_info_ =
-          std::make_tuple(j["log_dir"], j["log_name"], j["log_max_size"], j["log_max_size"]);
 
+      //Log config will not be monitored
+      log_info log_info_{};
+      if (j.contains("log_dir")) {
+         log_info_.log_dir = j["log_dir"];
+      }
+      if (j.contains("log_name")) {
+         log_info_.log_name = j["log_name"];
+      }
+      if (j.contains("log_max_files")) {
+         log_info_.log_max_files = j["log_max_files"];
+      }
+      if (j.contains("log_max_size")) {
+         log_info_.log_max_size = j["log_max_size"];
+      }
+
+      // Proxy config will be monitored, cpp_proxy will auto deal the changed config
       connection_buf_size_ = j["connection_buf_size"];
       for (auto& proxy : j["tcp_proxy"]) {
          uint16_t listen_port = proxy["listen_port"];
@@ -69,38 +123,13 @@ public:
    }
 
    auto get_connection_buf_size() {
-      return connection_buf_size_;
+      return connection_buf_size_.load();
    }
 
 private:
    config() = default;
    config(const config&) = delete;
    config& operator=(const config&) = delete;
-
-   template <size_t UpDepth = 0>
-   std::string get_executable_path() {
-      // the lengh is enough
-      constexpr size_t len = 2048;
-      char full_path[len]{};
-      std::string_view path;
-#ifdef _WIN32
-      GetModuleFileNameA(nullptr, full_path, len);
-#else
-      readlink("/proc/self/exe", full_path, len);
-#endif
-      path = full_path;
-      path = path.substr(0, path.find_last_of(R"(\)") + 1);
-      if constexpr (UpDepth == 0) {
-         return std::string{path.data(), path.length()};
-      }
-      else {
-         for (size_t i = 0; i < UpDepth; i++) {
-            path = path.substr(0, path.length() - 1);
-            path = path.substr(0, path.find_last_of(R"(\)") + 1);
-         }
-         return std::string{path.data(), path.length()};
-      }
-   }
 };
 
 }  // namespace cpp_proxy

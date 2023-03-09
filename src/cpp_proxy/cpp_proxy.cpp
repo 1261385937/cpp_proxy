@@ -25,8 +25,8 @@ asio::awaitable<void> listener(uint16_t listen_port, ExecutorPool&& pool) {
    }
 }
 
-int main() {
-   cpp_proxy::config::instance().parse_conf();
+int main(int, char* argv[]) {
+   cpp_proxy::config::instance().parse_conf(argv[1]);
    auto [dir, name, size, count] = cpp_proxy::config::instance().get_log_info();
    auto& proxy_info = cpp_proxy::config::instance().get_proxy_info();
 
