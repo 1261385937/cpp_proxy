@@ -168,7 +168,7 @@ private:
       local::tcp_endpoint endpoint(local::unix_domian_ip);
 #endif
 
-      for (; !eof_;) {
+      for (; !has_closed_;) {
          auto [ec] = co_await proxy_process_socket_.async_connect(endpoint);
          if (ec) {
             LOG_ERROR("connect_process error: {}", ec.message());
@@ -408,7 +408,7 @@ private:
          auto [rec, r_] = co_await asio::async_read(
              proxy_process_socket_, asio::buffer(head_buf, local::response_head_len));
          if (rec) [[unlikely]] {
-            if (eof_) {
+            if (has_closed_) {
                co_return;
             }
             LOG_ERROR("async_read head from process error: {}", rec.message());
@@ -428,7 +428,7 @@ private:
             auto [ec, _] = co_await asio::async_read(
                 proxy_process_socket_, asio::buffer(proxy_process_buf.data(), body_len));
             if (ec) [[unlikely]] {
-               if (eof_) {
+               if (has_closed_) {
                   co_return;
                }
                LOG_ERROR("async_read body from process error: {}", ec.message());
