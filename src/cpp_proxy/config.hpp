@@ -115,10 +115,10 @@ public:
             auto si = std::make_shared<server_info>();
             si->ip = server["ip"];
             si->port = server["port"];
-            if (proxy.contains("conn_buf_size")) {
+            if (server.contains("conn_buf_size")) {
                si->conn_buf_size = server["conn_buf_size"];
             }
-            if (proxy.contains("response_bypass")) {
+            if (server.contains("response_bypass")) {
                si->response_bypass = server["response_bypass"];
             }
             servers.emplace_back(std::move(si));
