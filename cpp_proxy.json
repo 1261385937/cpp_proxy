@@ -10,13 +10,13 @@
         {
           "ip": "127.0.0.1",
           "port": 3306,
-          "connection_buf_size": 65536,
+          "conn_buf_size": 65536,
           "response_bypass": true
         },
         {
           "ip": "127.0.0.1",
           "port": 3306,
-          "connection_buf_size": 65536,
+          "conn_buf_size": 65536,
           "response_bypass": true
         }
       ]
@@ -27,13 +27,13 @@
         {
           "ip": "127.0.0.1",
           "port": 27017,
-          "connection_buf_size": 65536,
+          "conn_buf_size": 65536,
           "response_bypass": true
         },
         {
           "ip": "127.0.0.1",
           "port": 27017,
-          "connection_buf_size": 65536,
+          "conn_buf_size": 65536,
           "response_bypass": true
         }
       ]
