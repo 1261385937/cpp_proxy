@@ -20,9 +20,6 @@
 
 namespace cpp_proxy {
 
-struct client2server {};
-struct server2client {};
-
 using asio::ip::tcp;
 
 class session : public std::enable_shared_from_this<session> {
@@ -37,7 +34,7 @@ private:
    local::tcp_socket proxy_process_socket_;
    bool has_closed_ = false;
    inline static std::atomic<size_t> count_ = 0;
-   std::vector<cpp_proxy::server_info>::iterator server_it_;
+   // std::vector<cpp_proxy::server_info>::iterator server_it_;
 
    bool eof_ = false;
    bool reconnecting_ = false;
@@ -69,15 +66,13 @@ public:
        : proxy_client_socket_(std::move(client_2proxy_socket)),
          proxy_server_socket_(proxy_client_socket_.get_executor()),
          proxy_process_socket_(proxy_client_socket_.get_executor()) {
-      proxy_client_buf_.resize(cpp_proxy::config::instance().get_connection_buf_size(), '\0');
-      proxy_server_buf_.resize(cpp_proxy::config::instance().get_connection_buf_size(), '\0');
       LOG_INFO("new session, now:{}", ++count_);
    }
 
    ~session() {
       LOG_INFO("session gone, now:{}. client: {}:{} --- proxy: {}:{} --- server: {}:{}", --count_,
                client_ip_, client_port_, proxy_ip_, proxy_port_, server_ip_, server_port_);
-      (*(server_it_->conns_))--;
+      //(*(server_it_->conns_))--;
       grace_close();
    }
 
@@ -110,11 +105,12 @@ private:
 
    asio::awaitable<void> setup_proxy() {
       auto listen_port = proxy_client_socket_.local_endpoint().port();
-      auto it = cpp_proxy::config::instance().get_proxy_info().find(listen_port);
-      auto& servers = it->second;
-      server_it_ = std::min_element(servers.begin(), servers.end());
-      server_ip_ = server_it_->ip;
-      server_port_ = server_it_->port;
+      auto server = cpp_proxy::config::instance().get_proxy_server(listen_port);
+      server_ip_ = server->ip;
+      server_port_ = server->port;
+      proxy_client_buf_.resize(server->conn_buf_size, '\0');
+      proxy_server_buf_.resize(server->conn_buf_size, '\0');
+      response_bypass_ = server->response_bypass;
 
       auto executor = co_await asio::this_coro::executor;
       auto [ec_r, ep] =
@@ -130,7 +126,7 @@ private:
                    server_port_);
          co_return;
       }
-      (*(server_it_->conns_))++;
+      //(*(server_it_->conns_))++;
 
       client_port_ = proxy_client_socket_.remote_endpoint().port();
       client_ip_ = proxy_client_socket_.remote_endpoint().address().to_string();
@@ -174,28 +170,29 @@ private:
 
       for (; !eof_;) {
          auto [ec] = co_await proxy_process_socket_.async_connect(endpoint);
-         if (!ec) {
-            LOG_INFO("connect_process ok");
-            reconnecting_ = false;
-
-            auto str = make_four_tuple();
-            uint32_t len = (uint32_t)str.length();
-            auto type = local::data_type::four_tuple;
-            std::vector<asio::const_buffer> write_buffers;
-            write_buffers.emplace_back(asio::buffer(&type, sizeof(type)));
-            write_buffers.emplace_back(asio::buffer(&len, 4));
-            write_buffers.emplace_back(asio::buffer(str.data(), str.length()));
-            co_await asio::async_write(proxy_process_socket_, write_buffers);
-
-            asio::co_spawn(
-                executor,
-                [self = shared_from_this()] { return self->process_2proxy_2client_or_2server(); },
-                asio::detached);
-            co_return;
+         if (ec) {
+            LOG_ERROR("connect_process error: {}", ec.message());
+            timer.expires_from_now(std::chrono::seconds(3));
+            co_await timer.async_wait();
+            continue;
          }
-         LOG_ERROR("connect_process error: {}", ec.message());
-         timer.expires_from_now(std::chrono::seconds(3));
-         co_await timer.async_wait();
+
+         LOG_INFO("connect_process ok");
+         reconnecting_ = false;
+         auto str = make_four_tuple();
+         uint32_t len = (uint32_t)str.length();
+         auto type = local::data_type::four_tuple;
+         std::vector<asio::const_buffer> write_buffers;
+         write_buffers.emplace_back(asio::buffer(&type, sizeof(type)));
+         write_buffers.emplace_back(asio::buffer(&len, 4));
+         write_buffers.emplace_back(asio::buffer(str.data(), str.length()));
+         co_await asio::async_write(proxy_process_socket_, write_buffers);
+
+         asio::co_spawn(
+             executor,
+             [self = shared_from_this()] { return self->process_2proxy_2client_or_2server(); },
+             asio::detached);
+         co_return;
       }
    }
 
@@ -563,6 +560,15 @@ private:
          // ***Here bypass, data from server to client
          // default response_bypass_ is true;
          if (bypass_ || response_bypass_) {
+            if (!bypass_ && response_bypass_) {
+               // if response_bypass_ is true, send empty data to process
+               uint8_t head[5];
+               head[0] = (uint8_t)local::data_type::from_server_to_client;
+               *(uint32_t*)(head + 1) = 0;
+               // Ignore the error, if disconnect with process, then client_request will deal.
+               co_await asio::async_write(proxy_process_socket_, asio::buffer(head, 5));
+            }
+
             auto ret = co_await server_2proxy_2client();
             if (ret == 0) [[likely]] {
                continue;

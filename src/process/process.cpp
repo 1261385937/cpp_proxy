@@ -81,14 +81,17 @@ private:
          }
          LOG_INFO("head:{} body_len: {}", type, body_len);
 
-         auto [ec, _] = co_await asio::async_read(socket_, asio::buffer(buf_.data(), body_len));
-         if (ec) [[unlikely]] {
-            if (ec != asio::error::eof) {
-               LOG_ERROR("async_read body from proxy error: {}", ec.message());
-               grace_close();
-               co_return;
+         // body_len is 0 when response_bypass_ is true by default
+         if (body_len != 0) {
+            auto [ec, _] = co_await asio::async_read(socket_, asio::buffer(buf_.data(), body_len));
+            if (ec) [[unlikely]] {
+               if (ec != asio::error::eof) {
+                  LOG_ERROR("async_read body from proxy error: {}", ec.message());
+                  grace_close();
+                  co_return;
+               }
+               eof_ = true;
             }
-            eof_ = true;
          }
 
          switch (type) {
@@ -116,6 +119,11 @@ private:
             case from_server_to_client: {
                res_handled_total_pkg_len_ += body_len;
                handle_response({buf_.data(), body_len});
+               if (body_len == 0) {
+                  // handle_response will return no data, just reset inner flag
+                  break;
+               }
+
                local::response_head res_head{};
                res_head.type = from_server_to_client;
                res_head.act = pass;

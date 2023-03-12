@@ -1,35 +1,42 @@
 {
-    "log_dir": "./",
-    "log_name": "tcp_proxy",
-    "log_max_size": 10485760,
-    "log_max_files": 10,
-    "connection_buf_size":8192,
-    "tcp_proxy": [
+  "log_dir": "./",
+  "log_name": "tcp_proxy",
+  "log_max_size": 10485760,
+  "log_max_files": 10,
+  "tcp_proxy": [
+    {
+      "listen_port": 9005,
+      "servers": [
         {
-            "listen_port": 9005,
-            "servers": [
-                {
-                    "ip": "172.16.37.31",
-                    "port": 3306
-                },
-                {
-                    "ip": "172.16.37.31",
-                    "port": 3306
-                }
-            ]
+          "ip": "127.0.0.1",
+          "port": 3306,
+          "connection_buf_size": 8192,
+          "response_bypass": true
         },
         {
-            "listen_port": 9006,
-            "servers": [
-                {
-                    "ip": "172.16.37.144",
-                    "port": 3306
-                },
-                {
-                    "ip": "172.16.37.144",
-                    "port": 3306
-                }
-            ]
+          "ip": "127.0.0.1",
+          "port": 3306,
+          "connection_buf_size": 8192,
+          "response_bypass": true
         }
-    ]
+      ]
+    },
+    {
+      "listen_port": 9007,
+      "servers": [
+        {
+          "ip": "127.0.0.1",
+          "port": 27017,
+          "connection_buf_size": 8192,
+          "response_bypass": true
+        },
+        {
+          "ip": "127.0.0.1",
+          "port": 27017,
+          "connection_buf_size": 8192,
+          "response_bypass": true
+        }
+      ]
+    }
+  ]
 }

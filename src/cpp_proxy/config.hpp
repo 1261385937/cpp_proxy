@@ -1,10 +1,13 @@
 #pragma once
+#include <algorithm>
 #include <atomic>
 #include <filesystem>
 #include <memory>
+#include <set>
+#include <shared_mutex>
 #include <string>
-#include <unordered_map>
 #include <vector>
+#include "load_balance.hpp"
 #include "nlohmann/json.hpp"
 
 #ifdef _WIN32
@@ -22,10 +25,10 @@ inline std::string get_executable_path() {
    std::string_view path;
 #ifdef _WIN32
    GetModuleFileNameA(nullptr, full_path, len);
-   char split_ident = R"(\)";
+   std::string_view split_ident = R"(\)";
 #else
    readlink("/proc/self/exe", full_path, len);
-   char split_ident = R"(/)";
+   std::string_view split_ident = R"(/)";
 #endif
    path = full_path;
    path = path.substr(0, path.find_last_of(split_ident) + 1);
@@ -44,10 +47,15 @@ inline std::string get_executable_path() {
 struct server_info {
    std::string ip;
    uint16_t port;
-   std::shared_ptr<std::atomic<uint64_t>> conns_{};
+   size_t conn_buf_size = 8124;
+   bool response_bypass = true;
+};
 
-   bool operator<(const server_info& s) {
-      return this->conns_ < s.conns_;
+struct proxy_entity {
+   uint16_t listen_port = 0;
+   std::vector<std::shared_ptr<server_info>> servers;
+   bool operator<(const proxy_entity& s) const {
+      return this->listen_port < s.listen_port;
    }
 };
 
@@ -58,16 +66,18 @@ struct log_info {
    std::string log_dir = get_executable_path() + "/log/";
 #endif
    std::string log_name = "cpp_proxy";
-   uint32_t log_max_files = 10;
    uint32_t log_max_size = 10 * 1024 * 1024;
+   uint32_t log_max_files = 10;
 };
 
 class config {
 private:
-   std::unordered_map<uint16_t, std::vector<server_info>> proxy_info_;
-   log_info log_info_;
-   std::atomic<size_t> connection_buf_size_ = 8192;
    std::string conf_path_;
+   log_info log_info_;
+   std::shared_mutex shared_mtx_;
+   std::set<proxy_entity> entities_;
+   std::set<proxy_entity> del_;
+   std::set<proxy_entity> add_;
 
 public:
    static auto& instance() {
@@ -84,8 +94,6 @@ public:
       fclose(file);
       auto j = nlohmann::json::parse(content);
 
-      //Log config will not be monitored
-      log_info log_info_{};
       if (j.contains("log_dir")) {
          log_info_.log_dir = j["log_dir"];
       }
@@ -99,31 +107,51 @@ public:
          log_info_.log_max_size = j["log_max_size"];
       }
 
-      // Proxy config will be monitored, cpp_proxy will auto deal the changed config
-      connection_buf_size_ = j["connection_buf_size"];
+      // Proxy config will be monitored, cpp_proxy will deal the changed config automatically
+      std::set<proxy_entity> entities{};
       for (auto& proxy : j["tcp_proxy"]) {
-         uint16_t listen_port = proxy["listen_port"];
-         std::vector<server_info> servers_info;
-         for (auto& servers : proxy["servers"]) {
-            std::string ip = servers["ip"];
-            uint16_t port = servers["port"];
-            servers_info.emplace_back(
-                server_info{std::move(ip), port, std::make_shared<std::atomic<uint64_t>>(0)});
+         std::vector<std::shared_ptr<server_info>> servers;
+         for (auto& server : proxy["servers"]) {
+            auto si = std::make_shared<server_info>();
+            si->ip = server["ip"];
+            si->port = server["port"];
+            if (proxy.contains("conn_buf_size")) {
+               si->conn_buf_size = server["conn_buf_size"];
+            }
+            if (proxy.contains("response_bypass")) {
+               si->response_bypass = server["response_bypass"];
+            }
+            servers.emplace_back(std::move(si));
          }
-         proxy_info_.emplace(listen_port, std::move(servers_info));
+         entities.emplace(proxy_entity{proxy["listen_port"], std::move(servers)});
       }
+
+      del_.clear();
+      std::set_difference(entities_.begin(), entities_.end(), entities.begin(), entities.end(),
+                          std::inserter(del_, del_.begin()));
+      add_.clear();
+      std::set_difference(entities.begin(), entities.end(), entities_.begin(), entities_.end(),
+                          std::inserter(add_, add_.begin()));
+
+      std::unique_lock lock(shared_mtx_);
+      entities_ = std::move(entities);
    }
 
-   auto get_log_info() {
+   auto& get_log_info() {
       return log_info_;
    }
 
-   auto& get_proxy_info() {
-      return proxy_info_;
+   auto& get_proxy_entities() {
+      return entities_;
    }
 
-   auto get_connection_buf_size() {
-      return connection_buf_size_.load();
+   auto get_proxy_server(uint16_t listen_port) {
+      std::shared_lock share_lock(shared_mtx_);
+      auto it = entities_.find(proxy_entity{listen_port});
+      if (it == entities_.end()) {
+         return std::shared_ptr<server_info>{};
+      }
+      return (*it).servers[0];
    }
 
 private:
