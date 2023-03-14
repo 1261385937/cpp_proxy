@@ -53,11 +53,15 @@ private:
    void handle_response(std::string_view data) {
    }
 
+   void handle_end() {
+   }
+
    asio::awaitable<void> setup() {
       for (;;) {
          if (eof_) [[unlikely]] {
             LOG_ERROR("remote peer close the connection");
             grace_close();
+            handle_end();
             co_return;
          }
          // Read data from proxy
@@ -69,6 +73,7 @@ private:
             if (rec != asio::error::eof) {
                LOG_ERROR("async_read head from proxy error: {}", rec.message());
                grace_close();
+               handle_end();
                co_return;
             }
             eof_ = true;
@@ -79,7 +84,7 @@ private:
          if (body_len > buf_.size()) [[unlikely]] {
             buf_.resize(body_len);
          }
-         LOG_INFO("head:{} body_len: {}", type, body_len);
+         //LOG_INFO("head:{} body_len: {}", type, body_len);
 
          // body_len is 0 when response_bypass_ is true by default
          if (body_len != 0) {
@@ -88,6 +93,7 @@ private:
                if (ec != asio::error::eof) {
                   LOG_ERROR("async_read body from proxy error: {}", ec.message());
                   grace_close();
+                  handle_end();
                   co_return;
                }
                eof_ = true;
@@ -137,6 +143,7 @@ private:
                if (wec) [[unlikely]] {
                   LOG_ERROR("async_write error: {}", wec.message());
                   grace_close();
+                  handle_end();
                   co_return;
                }
             } break;
