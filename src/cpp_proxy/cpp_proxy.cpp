@@ -9,27 +9,35 @@
 #include "io_context_pool.hpp"
 #include "session.hpp"
 
-template <typename ExecutorPool>
-asio::awaitable<void> listener(uint16_t listen_port, ExecutorPool&& pool) {
-   using asio::ip::tcp;
-   using default_token = asio::as_tuple_t<asio::use_awaitable_t<>>;
-   using tcp_acceptor = default_token::as_default_on_t<tcp::acceptor>;
+using asio::ip::tcp;
+using default_token = asio::as_tuple_t<asio::use_awaitable_t<>>;
+using tcp_acceptor = default_token::as_default_on_t<tcp::acceptor>;
+using port_acceptor = std::unordered_map<uint16_t, std::shared_ptr<tcp_acceptor>>;
 
+template <typename ExecutorPool>
+inline asio::awaitable<void> listener(uint16_t listen_port, port_acceptor& acceptors,
+                                      ExecutorPool&& pool) {
    auto executor = co_await asio::this_coro::executor;
-   tcp_acceptor acceptor(executor, {tcp::v6(), listen_port});
-   acceptor.set_option(tcp::acceptor::reuse_address(true));
+   auto acceptor =
+       std::make_shared<tcp_acceptor>(executor, asio::ip::tcp::endpoint{tcp::v6(), listen_port});
+   acceptor->set_option(tcp::acceptor::reuse_address(true));
+   acceptors.emplace(listen_port, acceptor);
 
    for (;;) {
       tcp::socket client_proxy_socket(pool.get_executor());
-      auto [ec] = co_await acceptor.async_accept(client_proxy_socket);
+      auto [ec] = co_await acceptor->async_accept(client_proxy_socket);
       if (ec) {
-         continue;
+         if (!acceptor->is_open()) {
+            co_return;
+         }
       }
       std::make_shared<cpp_proxy::session>(std::move(client_proxy_socket))->start();
    }
 }
 
-asio::awaitable<void> handle_config_change(std::string_view config_path) {
+template <typename ExecutorPool>
+inline asio::awaitable<void> handle_config_change(std::string_view config_path,
+                                                  port_acceptor& acceptors, ExecutorPool&& pool) {
    using default_token = asio::as_tuple_t<asio::use_awaitable_t<>>;
    using frequency_timer = default_token::as_default_on_t<asio::steady_timer>;
    auto executor = co_await asio::this_coro::executor;
@@ -44,12 +52,28 @@ asio::awaitable<void> handle_config_change(std::string_view config_path) {
          co_return;
       }
       auto now_time = std::filesystem::last_write_time(config_path);
-      if (last_time != now_time) {
-         LOG_WARN("cpp_proxy config changed");
-         cpp_proxy::config::instance().parse_conf(config_path);
-         // TODO, handle server config change, add listener or remove listener
+      if (last_time == now_time) {
+         continue;
       }
+
+      LOG_WARN("cpp_proxy config changed");
       last_time = now_time;
+      cpp_proxy::config::instance().parse_conf(config_path);
+
+      auto& add = cpp_proxy::config::instance().get_add_proxy_entities();
+      for (auto& a : add) {
+         LOG_WARN("add listen_port:{}", a.listen_port);
+         asio::co_spawn(executor, listener(a.listen_port, acceptors, pool), asio::detached);
+      }
+      auto& del = cpp_proxy::config::instance().get_del_proxy_entities();
+      for (auto& d : del) {
+         if (auto it = acceptors.find(d.listen_port); it != acceptors.end()) {
+            LOG_WARN("del listen_port:{}", d.listen_port);
+            asio::error_code _;
+            it->second->close(_);
+            acceptors.erase(it);
+         }
+      }
    }
 }
 
@@ -79,12 +103,14 @@ int main(int, char* argv[]) {
       signals.add(SIGFPE);
       signals.async_wait([&](auto, auto) { io_context.stop(); });
 
+      port_acceptor acceptors;
       auto& proxy_entities = cpp_proxy::config::instance().get_proxy_entities();
-      for (auto& proxy_entity : proxy_entities) {
-         asio::co_spawn(io_context, listener(proxy_entity.listen_port, icp), asio::detached);
+      for (auto& proxy : proxy_entities) {
+         asio::co_spawn(io_context, listener(proxy.listen_port, acceptors, icp), asio::detached);
       }
-      asio::co_spawn(io_context.get_executor(), handle_config_change(config_path), asio::detached);
 
+      asio::co_spawn(io_context.get_executor(), handle_config_change(config_path, acceptors, icp),
+                     asio::detached);
       io_context.run();
    } catch (std::exception& e) {
       LOG_ERROR("io_context exit, exception:{}", e.what());

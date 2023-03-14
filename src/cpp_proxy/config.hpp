@@ -145,6 +145,14 @@ public:
       return entities_;
    }
 
+   auto& get_add_proxy_entities() {
+      return add_;
+   }
+
+   auto& get_del_proxy_entities() {
+      return del_;
+   }
+
    auto get_proxy_server(uint16_t listen_port) {
       std::shared_lock share_lock(shared_mtx_);
       auto it = entities_.find(proxy_entity{listen_port});
