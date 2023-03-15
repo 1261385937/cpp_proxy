@@ -36,6 +36,7 @@ private:
          has_closed_ = true;
          socket_.shutdown(local::tcp_socket::shutdown_both);
          socket_.close();
+         handle_end();
       }
    }
 
@@ -61,7 +62,6 @@ private:
          if (eof_) [[unlikely]] {
             LOG_ERROR("remote peer close the connection");
             grace_close();
-            handle_end();
             co_return;
          }
          // Read data from proxy
@@ -73,7 +73,6 @@ private:
             if (rec != asio::error::eof) {
                LOG_ERROR("async_read head from proxy error: {}", rec.message());
                grace_close();
-               handle_end();
                co_return;
             }
             eof_ = true;
@@ -93,7 +92,6 @@ private:
                if (ec != asio::error::eof) {
                   LOG_ERROR("async_read body from proxy error: {}", ec.message());
                   grace_close();
-                  handle_end();
                   co_return;
                }
                eof_ = true;
@@ -143,7 +141,6 @@ private:
                if (wec) [[unlikely]] {
                   LOG_ERROR("async_write error: {}", wec.message());
                   grace_close();
-                  handle_end();
                   co_return;
                }
             } break;
