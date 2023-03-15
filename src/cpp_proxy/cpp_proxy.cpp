@@ -92,7 +92,7 @@ int main(int, char* argv[]) {
    LOG_WARN("cpp_proxy start");
 
    try {
-      io_context_pool icp(std::thread::hardware_concurrency());
+      io_context_pool icp(cpp_proxy::config::instance().get_work_threads());
       icp.start();
 
       asio::io_context io_context;
@@ -101,7 +101,10 @@ int main(int, char* argv[]) {
       signals.add(SIGABRT);
       signals.add(SIGILL);
       signals.add(SIGFPE);
-      signals.async_wait([&](auto, auto) { io_context.stop(); });
+      signals.async_wait([&](auto, auto sig) {
+         SPDLOG_ERROR("receive signal: {}, cpp_proxy exit", sig);
+         io_context.stop();
+      });
 
       port_acceptor acceptors;
       auto& proxy_entities = cpp_proxy::config::instance().get_proxy_entities();

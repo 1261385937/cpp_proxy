@@ -3,6 +3,7 @@
   "log_name": "tcp_proxy",
   "log_max_size": 10485760,
   "log_max_files": 10,
+  "worker_threads": 1,
   "tcp_proxy": [
     {
       "listen_port": 9005,
@@ -10,13 +11,13 @@
         {
           "ip": "127.0.0.1",
           "port": 3306,
-          "conn_buf_size": 65536,
+          "conn_buf_size": 131072,
           "response_bypass": true
         },
         {
           "ip": "127.0.0.1",
           "port": 3306,
-          "conn_buf_size": 65536,
+          "conn_buf_size": 131072,
           "response_bypass": true
         }
       ]
@@ -27,13 +28,13 @@
         {
           "ip": "127.0.0.1",
           "port": 27017,
-          "conn_buf_size": 65536,
+          "conn_buf_size": 131072,
           "response_bypass": true
         },
         {
           "ip": "127.0.0.1",
           "port": 27017,
-          "conn_buf_size": 65536,
+          "conn_buf_size": 131072,
           "response_bypass": true
         }
       ]

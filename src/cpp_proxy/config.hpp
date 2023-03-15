@@ -3,11 +3,11 @@
 #include <atomic>
 #include <filesystem>
 #include <memory>
+#include <mutex>
 #include <set>
 #include <shared_mutex>
 #include <string>
 #include <vector>
-#include <mutex>
 #include "load_balance.hpp"
 #include "nlohmann/json.hpp"
 
@@ -75,6 +75,7 @@ class config {
 private:
    std::string conf_path_;
    log_info log_info_;
+   uint32_t work_threads_ = 0;
    std::shared_mutex shared_mtx_;
    std::set<proxy_entity> entities_;
    std::set<proxy_entity> del_;
@@ -106,6 +107,9 @@ public:
       }
       if (j.contains("log_max_size")) {
          log_info_.log_max_size = j["log_max_size"];
+      }
+      if (j.contains("worker_threads")) {
+         work_threads_ = j["worker_threads"];
       }
 
       // Proxy config will be monitored, cpp_proxy will deal the changed config automatically
@@ -152,6 +156,10 @@ public:
 
    auto& get_del_proxy_entities() {
       return del_;
+   }
+
+   auto get_work_threads() {
+      return work_threads_ == 0 ? std::thread::hardware_concurrency() : work_threads_;
    }
 
    auto get_proxy_server(uint16_t listen_port) {

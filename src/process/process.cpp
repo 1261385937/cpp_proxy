@@ -198,7 +198,10 @@ int main() {
       signals.add(SIGABRT);
       signals.add(SIGILL);
       signals.add(SIGFPE);
-      signals.async_wait([&](auto, auto) { io_context.stop(); });
+      signals.async_wait([&](auto, auto sig) {
+         SPDLOG_ERROR("receive signal: {}, process exit", sig);
+         io_context.stop();
+      });
 
       std::remove(local::unix_domian_ip);
       asio::co_spawn(io_context, listener(icp), asio::detached);
