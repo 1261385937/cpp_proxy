@@ -7,6 +7,7 @@
 #include <shared_mutex>
 #include <string>
 #include <vector>
+#include <mutex>
 #include "load_balance.hpp"
 #include "nlohmann/json.hpp"
 

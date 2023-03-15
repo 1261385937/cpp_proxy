@@ -151,7 +151,7 @@ inline auto set_logger_module_level(const std::string& module_name, level::logge
 }  // namespace easylog
 
 // module define
-#define DECLARE_LOGGER_MODULE(module_name)                                                  \
+#define DECLARE_MODULE(module_name)                                                         \
    namespace easylog::modules {                                                             \
    namespace module_name {                                                                  \
    class logger_module_##module_name : public spdlog::logger {                              \
@@ -197,7 +197,7 @@ inline auto set_logger_module_level(const std::string& module_name, level::logge
 // 2. In main.cpp, set the log level.
 //	 easylog::set_logger_module_level("LOG", easylog::level::trace);
 
-DECLARE_LOGGER_MODULE(LOG);
+DECLARE_MODULE(LOG);
 #define LOG_TRACE(...) MODULE_TRACE(LOG, __VA_ARGS__);
 #define LOG_DEBUG(...) MODULE_DEBUG(LOG, __VA_ARGS__);
 #define LOG_INFO(...) MODULE_INFO(LOG, __VA_ARGS__);
