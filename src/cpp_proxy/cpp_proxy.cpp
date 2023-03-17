@@ -15,12 +15,25 @@ using tcp_acceptor = default_token::as_default_on_t<tcp::acceptor>;
 using port_acceptor = std::unordered_map<uint16_t, std::shared_ptr<tcp_acceptor>>;
 
 template <typename ExecutorPool>
-inline asio::awaitable<void> listener(uint16_t listen_port, port_acceptor& acceptors,
-                                      ExecutorPool&& pool) {
+inline asio::awaitable<void> listener(uint16_t listen_port, std::string_view listen_ip,
+                                      port_acceptor& acceptors, ExecutorPool&& pool) {
    auto executor = co_await asio::this_coro::executor;
-   auto acceptor =
-       std::make_shared<tcp_acceptor>(executor, asio::ip::tcp::endpoint{tcp::v6(), listen_port});
-   acceptor->set_option(tcp::acceptor::reuse_address(true));
+   std::shared_ptr<tcp_acceptor> acceptor;
+   asio::error_code ec;
+   if (listen_ip.empty()) {
+      acceptor =
+          std::make_shared<tcp_acceptor>(executor, asio::ip::tcp::endpoint{tcp::v6(), listen_port});
+   }
+   else {
+      auto ip_address = asio::ip::address::from_string(listen_ip.data(), ec);
+      if (ec) {
+         LOG_ERROR("listen_ip exception:{}", ec.message());
+         co_return;
+      }
+      acceptor = std::make_shared<tcp_acceptor>(executor,
+                                                asio::ip::tcp::endpoint{ip_address, listen_port});
+   }
+   acceptor->set_option(tcp::acceptor::reuse_address(true), ec);
    acceptors.emplace(listen_port, acceptor);
 
    for (;;) {
@@ -63,7 +76,8 @@ inline asio::awaitable<void> handle_config_change(std::string_view config_path,
       auto& add = cpp_proxy::config::instance().get_add_proxy_entities();
       for (auto& a : add) {
          LOG_WARN("add listen_port:{}", a.listen_port);
-         asio::co_spawn(executor, listener(a.listen_port, acceptors, pool), asio::detached);
+         asio::co_spawn(executor, listener(a.listen_port, a.listen_ip, acceptors, pool),
+                        asio::detached);
       }
       auto& del = cpp_proxy::config::instance().get_del_proxy_entities();
       for (auto& d : del) {
@@ -109,7 +123,8 @@ int main(int, char* argv[]) {
       port_acceptor acceptors;
       auto& proxy_entities = cpp_proxy::config::instance().get_proxy_entities();
       for (auto& proxy : proxy_entities) {
-         asio::co_spawn(io_context, listener(proxy.listen_port, acceptors, icp), asio::detached);
+         asio::co_spawn(io_context, listener(proxy.listen_port, proxy.listen_ip, acceptors, icp),
+                        asio::detached);
       }
 
       asio::co_spawn(io_context.get_executor(), handle_config_change(config_path, acceptors, icp),

@@ -55,6 +55,7 @@ struct server_info {
 
 struct proxy_entity {
    uint16_t listen_port = 0;
+   std::string listen_ip;
    std::vector<std::shared_ptr<server_info>> servers;
    bool operator<(const proxy_entity& s) const {
       return this->listen_port < s.listen_port;
@@ -129,7 +130,14 @@ public:
             }
             servers.emplace_back(std::move(si));
          }
-         entities.emplace(proxy_entity{proxy["listen_port"], std::move(servers)});
+
+         proxy_entity pe{};
+         if (proxy.contains("listen_ip")) {
+            pe.listen_ip = proxy["listen_ip"];
+         }
+         pe.listen_port = proxy["listen_port"];
+         pe.servers = std::move(servers);
+         entities.emplace(std::move(pe));
       }
 
       del_.clear();

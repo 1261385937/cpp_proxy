@@ -3,10 +3,11 @@
   "log_name": "tcp_proxy",
   "log_max_size": 10485760,
   "log_max_files": 10,
-  "worker_threads": 1,
+  "worker_threads": 4,
   "tcp_proxy": [
     {
       "listen_port": 9005,
+      "listen_ip": "127.0.0.1",
       "servers": [
         {
           "ip": "127.0.0.1",
