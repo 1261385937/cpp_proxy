@@ -393,7 +393,7 @@ private:
    asio::awaitable<void> process_2proxy_2client_or_2server() {
       // Connect process ok, then disable bypass
       bypass_ = false;
-      LOG_WARN(" ident: {}", session_ident_);
+      LOG_WARN("setup process_2proxy_2client_or_2server, ident: {}", session_ident_);
       std::string proxy_process_buf;
 
       // Proxy read data from process
