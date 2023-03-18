@@ -34,7 +34,6 @@ private:
    local::tcp_socket proxy_process_socket_;
    bool has_closed_ = false;
    inline static std::atomic<size_t> count_ = 0;
-   // std::vector<cpp_proxy::server_info>::iterator server_it_;
 
    bool eof_ = false;
    bool reconnecting_ = false;
@@ -54,12 +53,11 @@ private:
    uint64_t req_handled_total_pkg_len_ = 0;
    uint64_t res_handled_total_pkg_len_ = 0;
 
+   std::string session_ident_;
    std::string server_ip_;
-   uint16_t server_port_{};
+   uint16_t server_port_;
    std::string client_ip_;
-   uint16_t client_port_{};
-   std::string proxy_ip_;
-   uint16_t proxy_port_{};
+   uint16_t client_port_;
 
 public:
    session(tcp_socket client_2proxy_socket)
@@ -70,9 +68,7 @@ public:
    }
 
    ~session() {
-      LOG_INFO("session gone, now:{}. client: {}:{} --- proxy: {}:{} --- server: {}:{}", --count_,
-               client_ip_, client_port_, proxy_ip_, proxy_port_, server_ip_, server_port_);
-      //(*(server_it_->conns_))--;
+      LOG_INFO("session gone, now:{}. ident: {}", --count_, session_ident_);
       grace_close();
    }
 
@@ -122,18 +118,17 @@ private:
 
       auto [ec_c, _] = co_await asio::async_connect(proxy_server_socket_, ep);
       if (ec_c) {
-         LOG_ERROR("async_connect exception:{}, ip: {}, port: {}", ec_c.message(), server_ip_,
-                   server_port_);
+         LOG_ERROR("async_connect {}:{} exception:{}", server_ip_, server_port_, ec_c.message());
          co_return;
       }
-      //(*(server_it_->conns_))++;
 
-      client_port_ = proxy_client_socket_.remote_endpoint().port();
       client_ip_ = proxy_client_socket_.remote_endpoint().address().to_string();
-      proxy_ip_ = proxy_client_socket_.local_endpoint().address().to_string();
-      proxy_port_ = proxy_client_socket_.local_endpoint().port();
-      LOG_INFO("client: {}:{} --- proxy: {}:{} --- server: {}:{}", client_ip_, client_port_,
-               proxy_ip_, proxy_port_, server_ip_, server_port_);
+      client_port_ = proxy_client_socket_.remote_endpoint().port();
+      auto proxy_ip = proxy_client_socket_.local_endpoint().address().to_string();
+      auto proxy_port = proxy_client_socket_.local_endpoint().port();
+      session_ident_ = client_ip_ + ":" + std::to_string(client_port_) + " -- " + proxy_ip + ":" +
+                       std::to_string(proxy_port) + " -- " + server_ip_ + ":" +
+                       std::to_string(server_port_);
 
       asio::co_spawn(
           executor, [sf = shared_from_this()] { return sf->connect_process(); }, asio::detached);
@@ -147,10 +142,10 @@ private:
 
    std::string make_four_tuple() {
       nlohmann::json j;
-      j["client_ip"] = client_ip_;
-      j["client_port"] = client_port_;
       j["server_ip"] = server_ip_;
       j["server_port"] = server_port_;
+      j["client_ip"] = client_ip_;
+      j["client_port"] = client_port_;
       return j.dump();
    }
 
@@ -171,13 +166,13 @@ private:
       for (; !has_closed_;) {
          auto [ec] = co_await proxy_process_socket_.async_connect(endpoint);
          if (ec) {
-            LOG_ERROR("connect_process error: {}", ec.message());
+            LOG_ERROR("connect_process error: {}, ident: {}", ec.message(), session_ident_);
             timer.expires_from_now(std::chrono::seconds(3));
             co_await timer.async_wait();
             continue;
          }
 
-         LOG_INFO("connect_process ok");
+         LOG_INFO("connect_process ok, ident: {}", session_ident_);
          reconnecting_ = false;
          auto str = make_four_tuple();
          uint32_t len = (uint32_t)str.length();
@@ -237,14 +232,13 @@ private:
                                             const std::string& direction) {
       if (!bypass_) {
          bypass_ = true;
-         LOG_WARN("enable bypass. client: {}:{} --- proxy: {}:{} --- server: {}:{}", client_ip_,
-                  client_port_, proxy_ip_, proxy_port_, server_ip_, server_port_);
+         LOG_WARN("enable bypass. ident: {}", session_ident_);
       }
 
       // Try to reconnect process, then disable bypass if reconnect ok
       if (!reconnecting_) {
          reconnecting_ = true;
-         LOG_ERROR("try to reconnect process");
+         LOG_ERROR("try to reconnect process, ident: {}", session_ident_);
          auto executor = co_await asio::this_coro::executor;
          asio::co_spawn(
              executor, [self = shared_from_this()] { return self->connect_process(); },
@@ -264,7 +258,7 @@ private:
       }
       auto [wec, w_] = co_await asio::async_write(socket, write_buffers);
       if (wec) [[unlikely]] {
-         LOG_ERROR("async_write " + direction + " error: {}", wec.message());
+         LOG_ERROR("async_write {} error: {}, ident: {}", direction, wec.message(), session_ident_);
          grace_close();
          co_return -1;
       }
@@ -293,14 +287,15 @@ private:
          auto [ec, _] = co_await asio::async_write(
              socket, asio::buffer(proxy_process_buf.data(), head->new_data_len));
          if (ec) {
-            LOG_ERROR("async_write " + direction + " error: {}", ec.message());
+            LOG_ERROR("async_write {} error: {}, ident: {}", direction, ec.message(),
+                      session_ident_);
             grace_close();
             co_return -1;
          }
       }
       // Get block action
       if (head->act == local::action::block) {
-         LOG_WARN("get block action, close all connections");
+         LOG_WARN("get block action, close all connections, ident: {}", session_ident_);
          grace_close();
          co_return -1;
       }
@@ -316,7 +311,7 @@ private:
       // Transfer the handled data
       auto [wec, w_] = co_await asio::async_write(socket, write_buffers);
       if (wec) [[unlikely]] {
-         LOG_ERROR("async_write " + direction + " error: {}", wec.message());
+         LOG_ERROR("async_write {} error: {}, ident: {}", direction, wec.message(), session_ident_);
          grace_close();
          co_return -1;
       }
@@ -330,14 +325,14 @@ private:
                                       std::string_view proxy_process_buf) {
       co_return co_await inner_proxy_2client_or_2server(
           head, proxy_process_buf, data_from_server_to_client_, res_handled_total_pkg_len_,
-          proxy_client_socket_, "2client");
+          proxy_client_socket_, " to client");
    }
 
    asio::awaitable<int> proxy_2server(local::response_head* head,
                                       std::string_view proxy_process_buf) {
       co_return co_await inner_proxy_2client_or_2server(
           head, proxy_process_buf, data_from_client_to_server_, req_handled_total_pkg_len_,
-          proxy_server_socket_, "2server");
+          proxy_server_socket_, "to server");
    }
 
    asio::awaitable<int> inner_client_or_server_2proxy_2process(std::shared_ptr<data_block>& block,
@@ -357,7 +352,8 @@ private:
       auto [rec, n] = co_await socket.async_read_some(asio::buffer(data_pos + 5, available - 5));
       if (rec) [[unlikely]] {
          if (rec != asio::error::eof) {
-            LOG_ERROR("async_read_some " + direction + " error: {}", rec.message());
+            LOG_ERROR("async_read_some {} error: {}, ident: {}", direction, rec.message(),
+                      session_ident_);
             grace_close();
             co_return -1;
          }
@@ -376,7 +372,7 @@ private:
       auto [ec, _] =
           co_await asio::async_write(proxy_process_socket_, asio::buffer(data_pos, n + 5));
       if (ec) [[unlikely]] {
-         LOG_ERROR("async_write to process error: {}", ec.message());
+         LOG_ERROR("async_write to process error: {}, ident: {}", ec.message(), session_ident_);
          co_return -2;
       }
       co_return 0;
@@ -397,8 +393,7 @@ private:
    asio::awaitable<void> process_2proxy_2client_or_2server() {
       // Connect process ok, then disable bypass
       bypass_ = false;
-      LOG_WARN("disable bypass. client: {}:{} --- proxy: {}:{} --- server: {}:{}", client_ip_,
-               client_port_, proxy_ip_, proxy_port_, server_ip_, server_port_);
+      LOG_WARN(" ident: {}", session_ident_);
       std::string proxy_process_buf;
 
       // Proxy read data from process
@@ -411,7 +406,8 @@ private:
             if (has_closed_) {
                co_return;
             }
-            LOG_ERROR("async_read head from process error: {}", rec.message());
+            LOG_ERROR("async_read head from process error: {}, ident: {}", rec.message(),
+                      session_ident_);
             co_await enable_bypass_2server();
             co_await enable_bypass_2client();
             co_return;
@@ -431,7 +427,8 @@ private:
                if (has_closed_) {
                   co_return;
                }
-               LOG_ERROR("async_read body from process error: {}", ec.message());
+               LOG_ERROR("async_read body from process error: {}, ident: {}", ec.message(),
+                         session_ident_);
                co_await enable_bypass_2server();
                co_await enable_bypass_2client();
                co_return;
@@ -464,7 +461,8 @@ private:
           co_await proxy_client_socket_.async_read_some(asio::buffer(proxy_client_buf_));
       if (rec) [[unlikely]] {
          if (rec != asio::error::eof) {
-            LOG_ERROR("async_read_some from client error: {}", rec.message());
+            LOG_ERROR("async_read_some from client error: {}, ident: {}", rec.message(),
+                      session_ident_);
             grace_close();
             co_return -1;
          }
@@ -479,7 +477,7 @@ private:
       auto [wec, _] =
           co_await asio::async_write(proxy_server_socket_, asio::buffer(proxy_client_buf_, n));
       if (wec) [[unlikely]] {
-         LOG_ERROR("async_write to server error: {}", wec.message());
+         LOG_ERROR("async_write to server error: {}, ident: {}", wec.message(), session_ident_);
          grace_close();
          co_return -1;
       }
@@ -490,7 +488,7 @@ private:
       std::shared_ptr<data_block> block = nullptr;
       for (;;) {
          if (eof_) [[unlikely]] {
-            LOG_INFO("remote peer (client) close the connection");
+            LOG_INFO("remote peer (client) close the connection, ident: {}", session_ident_);
             grace_close();
             co_return;
          }
@@ -528,7 +526,8 @@ private:
           co_await proxy_server_socket_.async_read_some(asio::buffer(proxy_server_buf_));
       if (rec) [[unlikely]] {
          if (rec != asio::error::eof) {
-            LOG_ERROR("async_read_some from server error: {}", rec.message());
+            LOG_ERROR("async_read_some from server error: {}, ident: {}", rec.message(),
+                      session_ident_);
             grace_close();
             co_return -1;
          }
@@ -541,7 +540,7 @@ private:
       auto [wec, _] =
           co_await asio::async_write(proxy_client_socket_, asio::buffer(proxy_server_buf_, n));
       if (wec) [[unlikely]] {
-         LOG_ERROR("async_write to client error: {}", wec.message());
+         LOG_ERROR("async_write to client error: {}, ident: {}", wec.message(), session_ident_);
          grace_close();
          co_return -1;
       }
@@ -552,7 +551,7 @@ private:
       std::shared_ptr<data_block> block = nullptr;
       for (;;) {
          if (eof_) [[unlikely]] {
-            LOG_INFO("remote peer (server) close the connection");
+            LOG_INFO("remote peer (server) close the connection,ident: {}", session_ident_);
             grace_close();
             co_return;
          }

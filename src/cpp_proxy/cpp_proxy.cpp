@@ -19,21 +19,21 @@ inline asio::awaitable<void> listener(uint16_t listen_port, std::string_view lis
                                       port_acceptor& acceptors, ExecutorPool&& pool) {
    auto executor = co_await asio::this_coro::executor;
    std::shared_ptr<tcp_acceptor> acceptor;
-   asio::error_code ec;
+   asio::error_code ecode;
    if (listen_ip.empty()) {
       acceptor =
           std::make_shared<tcp_acceptor>(executor, asio::ip::tcp::endpoint{tcp::v6(), listen_port});
    }
    else {
-      auto ip_address = asio::ip::address::from_string(listen_ip.data(), ec);
-      if (ec) {
-         LOG_ERROR("listen_ip exception:{}", ec.message());
+      auto ip_address = asio::ip::address::from_string(listen_ip.data(), ecode);
+      if (ecode) {
+         LOG_ERROR("listen_ip exception:{}", ecode.message());
          co_return;
       }
       acceptor = std::make_shared<tcp_acceptor>(executor,
                                                 asio::ip::tcp::endpoint{ip_address, listen_port});
    }
-   acceptor->set_option(tcp::acceptor::reuse_address(true), ec);
+   acceptor->set_option(tcp::acceptor::reuse_address(true), ecode);
    acceptors.emplace(listen_port, acceptor);
 
    for (;;) {
