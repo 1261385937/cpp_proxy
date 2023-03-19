@@ -1,4 +1,3 @@
-
 #include "asio/as_tuple.hpp"
 #include "asio/co_spawn.hpp"
 #include "asio/detached.hpp"
@@ -11,29 +10,45 @@
 #include "nlohmann/json.hpp"
 
 class session : public std::enable_shared_from_this<session> {
+public:
+   using default_token = asio::as_tuple_t<asio::use_awaitable_t<>>;
+   using frequency_timer = default_token::as_default_on_t<asio::steady_timer>;
+
 private:
    local::tcp_socket socket_;
    std::string buf_;
    bool has_closed_ = false;
    bool eof_ = false;
+   frequency_timer heartbeat_timer_;
 
+   inline static std::atomic<size_t> count_ = 0;
    uint64_t req_handled_total_pkg_len_ = 0;
    uint64_t res_handled_total_pkg_len_ = 0;
 
 public:
-   session(local::tcp_socket sock) : socket_(std::move(sock)) {
+   session(local::tcp_socket sock)
+       : socket_(std::move(sock)), heartbeat_timer_(socket_.get_executor()) {
+      LOG_INFO("new session, now:{}", ++count_);
+   }
+
+   ~session() {
+      LOG_INFO("session gone, now:{}", --count_);
+      grace_close();
    }
 
    void start() {
+      auto executor = socket_.get_executor();
       asio::co_spawn(
-          socket_.get_executor(), [self = shared_from_this()] { return self->setup(); },
-          asio::detached);
+          executor, [self = shared_from_this()] { return self->setup(); }, asio::detached);
+      asio::co_spawn(
+          executor, [self = shared_from_this()] { return self->heartbeat(); }, asio::detached);
    }
 
 private:
    void grace_close() {
       if (!has_closed_) {
          has_closed_ = true;
+         heartbeat_timer_.cancel();
          socket_.shutdown(local::tcp_socket::shutdown_both);
          socket_.close();
          handle_end();
@@ -57,7 +72,32 @@ private:
    void handle_end() {
    }
 
+   asio::awaitable<void> heartbeat() {
+      using default_token = asio::as_tuple_t<asio::use_awaitable_t<>>;
+      using frequency_timer = default_token::as_default_on_t<asio::steady_timer>;
+      auto executor = co_await asio::this_coro::executor;
+
+      for (; !has_closed_;) {
+         heartbeat_timer_.expires_from_now(std::chrono::seconds(5));
+         auto [ec] = co_await heartbeat_timer_.async_wait();
+         if (ec) {
+            continue;
+         }
+
+         local::response_head head{};
+         head.type = local::data_type::heartbeat;
+         auto [wec, w_] = co_await asio::async_write(socket_, asio::buffer(&head, sizeof(head)));
+         if (wec) [[unlikely]] {
+            LOG_ERROR("async_write error: {}", wec.message());
+            grace_close();
+            co_return;
+         }
+      }
+   }
+
    asio::awaitable<void> setup() {
+      LOG_INFO("setup");
+      size_t count = 0;
       for (;;) {
          if (eof_) [[unlikely]] {
             LOG_ERROR("remote peer close the connection");
@@ -67,8 +107,8 @@ private:
          // Read data from proxy
 
          // Read head 1byte + 4byte
-         char head[5];
-         auto [rec, r_] = co_await asio::async_read(socket_, asio::buffer(head, 5));
+         char head_buf[5];
+         auto [rec, r_] = co_await asio::async_read(socket_, asio::buffer(head_buf, 5));
          if (rec) [[unlikely]] {
             if (rec != asio::error::eof) {
                LOG_ERROR("async_read head from proxy error: {}", rec.message());
@@ -78,12 +118,18 @@ private:
             eof_ = true;
          }
 
-         auto type = (local::data_type)(head[0]);
-         auto body_len = *(uint32_t*)(head + 1);
+         auto type = (local::data_type)(head_buf[0]);
+         auto body_len = *(uint32_t*)(head_buf + 1);
          if (body_len > buf_.size()) [[unlikely]] {
             buf_.resize(body_len);
          }
-         //LOG_INFO("head:{} body_len: {}", type, body_len);
+         count++;
+         LOG_INFO("head:{} body_len: {} count:{}", type, body_len, count);
+        
+         if (count % 100 == 0) {
+            using namespace std::chrono_literals;
+            std::this_thread::sleep_for(10s);
+         }
 
          // body_len is 0 when response_bypass_ is true by default
          if (body_len != 0) {
@@ -104,13 +150,13 @@ private:
             case from_client_to_server: {
                req_handled_total_pkg_len_ += body_len;
                handle_request({buf_.data(), body_len});
-               local::response_head req_head{};
-               req_head.type = from_client_to_server;
-               req_head.act = pass;
-               req_head.handled_total_pkg_len = req_handled_total_pkg_len_;
+               local::response_head head{};
+               head.type = from_client_to_server;
+               head.act = pass;
+               head.handled_total_pkg_len = req_handled_total_pkg_len_;
 
                std::vector<asio::const_buffer> write_buffers;
-               write_buffers.emplace_back(asio::buffer(&req_head, sizeof(req_head)));
+               write_buffers.emplace_back(asio::buffer(&head, sizeof(head)));
                // write_buffers.emplace_back(asio::buffer(buf_.data(), body_len));
 
                auto [wec, w_] = co_await asio::async_write(socket_, write_buffers);
@@ -128,13 +174,13 @@ private:
                   break;
                }
 
-               local::response_head res_head{};
-               res_head.type = from_server_to_client;
-               res_head.act = pass;
-               res_head.handled_total_pkg_len = res_handled_total_pkg_len_;
+               local::response_head head{};
+               head.type = from_server_to_client;
+               head.act = pass;
+               head.handled_total_pkg_len = res_handled_total_pkg_len_;
 
                std::vector<asio::const_buffer> write_buffers;
-               write_buffers.emplace_back(asio::buffer(&res_head, sizeof(res_head)));
+               write_buffers.emplace_back(asio::buffer(&head, sizeof(head)));
                // write_buffers.emplace_back(asio::buffer(buf_.data(), body_len));
 
                auto [wec, w_] = co_await asio::async_write(socket_, write_buffers);
@@ -163,11 +209,11 @@ asio::awaitable<void> listener(ExecutorPool&& pool) {
 #else
    local::tcp_acceptor acceptor(executor, tcp_endpoint(tcp_type::v6(), local::local_port));
 #endif
+   acceptor.set_option(tcp_type::acceptor::reuse_address(true));
 
    for (;;) {
       local::tcp_socket socket(pool.get_executor());
       auto [ec] = co_await acceptor.async_accept(socket);
-      acceptor.set_option(tcp_type::acceptor::reuse_address(true));
       if (ec) {
          continue;
       }

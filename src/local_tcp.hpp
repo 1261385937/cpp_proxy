@@ -31,7 +31,8 @@ constexpr uint16_t local_port = 23456;
 enum class data_type : uint8_t {
    from_client_to_server,
    from_server_to_client,
-   four_tuple
+   four_tuple,
+   heartbeat
 };
 
 enum class action : uint8_t {

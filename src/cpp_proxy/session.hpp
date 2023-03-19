@@ -27,6 +27,7 @@ public:
    using default_token = asio::as_tuple_t<asio::use_awaitable_t<>>;
    using tcp_socket = default_token::as_default_on_t<tcp::socket>;
    using tcp_resolver = default_token::as_default_on_t<tcp::resolver>;
+   using frequency_timer = default_token::as_default_on_t<asio::steady_timer>;
 
 private:
    tcp_socket proxy_client_socket_;
@@ -36,9 +37,10 @@ private:
    inline static std::atomic<size_t> count_ = 0;
 
    bool eof_ = false;
-   bool reconnecting_ = false;
    bool bypass_ = true;
    bool response_bypass_ = true;
+   bool process_connecting_ = false;
+   frequency_timer detect_process_timeout_timer_;
 
    std::string proxy_client_buf_;
    std::string proxy_server_buf_;
@@ -55,15 +57,16 @@ private:
 
    std::string session_ident_;
    std::string server_ip_;
-   uint16_t server_port_;
+   uint16_t server_port_{};
    std::string client_ip_;
-   uint16_t client_port_;
+   uint16_t client_port_{};
 
 public:
    session(tcp_socket client_2proxy_socket)
        : proxy_client_socket_(std::move(client_2proxy_socket)),
          proxy_server_socket_(proxy_client_socket_.get_executor()),
-         proxy_process_socket_(proxy_client_socket_.get_executor()) {
+         proxy_process_socket_(proxy_client_socket_.get_executor()),
+         detect_process_timeout_timer_(proxy_client_socket_.get_executor()) {
       LOG_INFO("new session, now:{}", ++count_);
    }
 
@@ -89,6 +92,7 @@ private:
    void grace_close() {
       if (!has_closed_) {
          has_closed_ = true;
+         detect_process_timeout_timer_.cancel();
          asio::error_code ignored_ec;
          proxy_client_socket_.shutdown(tcp_socket::shutdown_both, ignored_ec);
          proxy_client_socket_.close(ignored_ec);
@@ -140,6 +144,25 @@ private:
           executor, [sf = shared_from_this()] { return sf->server_response(); }, asio::detached);
    }
 
+   asio::awaitable<void> detect_process_timeout() {
+      auto executor = co_await asio::this_coro::executor;
+      for (; !has_closed_ && !process_connecting_;) {
+         detect_process_timeout_timer_.expires_from_now(std::chrono::seconds(10));
+         auto [ec] = co_await detect_process_timeout_timer_.async_wait();
+         if (ec) {
+            continue;
+         }
+
+         // Session from process timeout, maybe process thread dead loop or handle badly,
+         // close the session then reconnect for changing another process thread.
+         LOG_WARN("session from process timeout, close the session, ident: {}", session_ident_);
+         asio::error_code ignored_ec;
+         proxy_process_socket_.shutdown(local::tcp_socket::shutdown_both, ignored_ec);
+         proxy_process_socket_.close(ignored_ec);
+         co_return;
+      }
+   }
+
    std::string make_four_tuple() {
       nlohmann::json j;
       j["server_ip"] = server_ip_;
@@ -150,18 +173,23 @@ private:
    }
 
    asio::awaitable<void> connect_process() {
-      reset_local_socket();
-      req_handled_total_pkg_len_ = 0;
-      res_handled_total_pkg_len_ = 0;
+      if (process_connecting_) {
+         co_return;
+      }
 
-      auto executor = co_await asio::this_coro::executor;
-      using frequency_timer = default_token::as_default_on_t<asio::steady_timer>;
-      frequency_timer timer(executor);
+      LOG_INFO("try to reconnect process, ident: {}", session_ident_);
+      reset_local_socket();
 #ifndef UDS
       local::tcp_endpoint endpoint(asio::ip::address{}.from_string("127.0.0.1"), local::local_port);
 #else
       local::tcp_endpoint endpoint(local::unix_domian_ip);
 #endif
+      req_handled_total_pkg_len_ = 0;
+      res_handled_total_pkg_len_ = 0;
+      auto executor = co_await asio::this_coro::executor;
+      frequency_timer timer(executor);
+      process_connecting_ = true;
+      detect_process_timeout_timer_.cancel();
 
       for (; !has_closed_;) {
          auto [ec] = co_await proxy_process_socket_.async_connect(endpoint);
@@ -171,9 +199,11 @@ private:
             co_await timer.async_wait();
             continue;
          }
+         // Connect process ok, then disable bypass
+         bypass_ = false;
+         process_connecting_ = false;
 
          LOG_INFO("connect_process ok, ident: {}", session_ident_);
-         reconnecting_ = false;
          auto str = make_four_tuple();
          uint32_t len = (uint32_t)str.length();
          auto type = local::data_type::four_tuple;
@@ -186,6 +216,9 @@ private:
          asio::co_spawn(
              executor,
              [self = shared_from_this()] { return self->process_2proxy_2client_or_2server(); },
+             asio::detached);
+         asio::co_spawn(
+             executor, [sf = shared_from_this()] { return sf->detect_process_timeout(); },
              asio::detached);
          co_return;
       }
@@ -233,16 +266,6 @@ private:
       if (!bypass_) {
          bypass_ = true;
          LOG_WARN("enable bypass. ident: {}", session_ident_);
-      }
-
-      // Try to reconnect process, then disable bypass if reconnect ok
-      if (!reconnecting_) {
-         reconnecting_ = true;
-         LOG_ERROR("try to reconnect process, ident: {}", session_ident_);
-         auto executor = co_await asio::this_coro::executor;
-         asio::co_spawn(
-             executor, [self = shared_from_this()] { return self->connect_process(); },
-             asio::detached);
       }
 
       // Transfer the all data to client/server in stored_data
@@ -391,10 +414,8 @@ private:
    }
 
    asio::awaitable<void> process_2proxy_2client_or_2server() {
-      // Connect process ok, then disable bypass
-      bypass_ = false;
       LOG_WARN("setup process_2proxy_2client_or_2server, ident: {}", session_ident_);
-      std::string proxy_process_buf;
+      auto executor = co_await asio::this_coro::executor;
 
       // Proxy read data from process
       for (;;) {
@@ -410,12 +431,19 @@ private:
                       session_ident_);
             co_await enable_bypass_2server();
             co_await enable_bypass_2client();
+            asio::co_spawn(
+                executor, [sf = shared_from_this()] { return sf->connect_process(); },
+                asio::detached);
             co_return;
          }
          auto head = (local::response_head*)head_buf;
-         // LOG_INFO("head:{} body_len: {}", head->type, head->new_data_len);
+
+         if (head->type != local::data_type::heartbeat) {
+            LOG_INFO("head:{} body_len: {}", head->type, head->new_data_len);
+         }
 
          //**Read body if has
+         std::string proxy_process_buf;
          auto body_len = head->new_data_len;
          if (body_len != 0) [[unlikely]] {
             if (body_len > proxy_process_buf.size()) {
@@ -431,6 +459,9 @@ private:
                          session_ident_);
                co_await enable_bypass_2server();
                co_await enable_bypass_2client();
+               asio::co_spawn(
+                   executor, [sf = shared_from_this()] { return sf->connect_process(); },
+                   asio::detached);
                co_return;
             }
          }
@@ -448,6 +479,9 @@ private:
                if (ret == -1) [[unlikely]] {
                   co_return;
                }
+            } break;
+            case heartbeat: {
+               detect_process_timeout_timer_.cancel();
             } break;
             default:
                break;
@@ -514,6 +548,10 @@ private:
          // ret is -2, proxy write data to process error
          ret = co_await enable_bypass_2server();
          if (ret == 0) [[likely]] {
+            auto executor = co_await asio::this_coro::executor;
+            asio::co_spawn(
+                executor, [sf = shared_from_this()] { return sf->connect_process(); },
+                asio::detached);
             continue;
          }
          co_return;
@@ -587,6 +625,10 @@ private:
          // ret is -2, proxy write data to process error
          ret = co_await enable_bypass_2client();
          if (ret == 0) [[likely]] {
+            auto executor = co_await asio::this_coro::executor;
+            asio::co_spawn(
+                executor, [sf = shared_from_this()] { return sf->connect_process(); },
+                asio::detached);
             continue;
          }
          co_return;
