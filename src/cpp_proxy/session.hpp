@@ -104,28 +104,26 @@ private:
    }
 
    asio::awaitable<void> setup_proxy() {
+      auto executor = co_await asio::this_coro::executor;
       auto listen_port = proxy_client_socket_.local_endpoint().port();
       auto server = cpp_proxy::config::instance().get_proxy_server(listen_port);
-      server_ip_ = server->ip;
-      server_port_ = server->port;
+      auto [ec_r, ep] =
+          co_await tcp_resolver(executor).async_resolve(server->ip, std::to_string(server->port));
+      if (ec_r) {
+         LOG_ERROR("tcp_resolver {}:{} exception: {}", server->ip, server->port, ec_r.message());
+         co_return;
+      }
+      auto [ec_c, _] = co_await asio::async_connect(proxy_server_socket_, ep);
+      if (ec_c) {
+         LOG_ERROR("async_connect {}:{} exception:{}", server->ip, server->port, ec_c.message());
+         co_return;
+      }
+
       proxy_client_buf_.resize(server->conn_buf_size, '\0');
       proxy_server_buf_.resize(server->conn_buf_size, '\0');
       response_bypass_ = server->response_bypass;
-
-      auto executor = co_await asio::this_coro::executor;
-      auto [ec_r, ep] =
-          co_await tcp_resolver(executor).async_resolve(server_ip_, std::to_string(server_port_));
-      if (ec_r) {
-         LOG_ERROR("tcp_resolver exception: {}", ec_r.message());
-         co_return;
-      }
-
-      auto [ec_c, _] = co_await asio::async_connect(proxy_server_socket_, ep);
-      if (ec_c) {
-         LOG_ERROR("async_connect {}:{} exception:{}", server_ip_, server_port_, ec_c.message());
-         co_return;
-      }
-
+      server_ip_ = server->ip;
+      server_port_ = server->port;
       client_ip_ = proxy_client_socket_.remote_endpoint().address().to_string();
       client_port_ = proxy_client_socket_.remote_endpoint().port();
       auto proxy_ip = proxy_client_socket_.local_endpoint().address().to_string();
@@ -134,14 +132,13 @@ private:
                        std::to_string(proxy_port) + " -- " + server_ip_ + ":" +
                        std::to_string(server_port_);
 
+      auto sf = shared_from_this();
       asio::co_spawn(
-          executor, [sf = shared_from_this()] { return sf->connect_process(); }, asio::detached);
-
+          executor, [sf] { return sf->connect_process(); }, asio::detached);
       asio::co_spawn(
-          executor, [sf = shared_from_this()] { return sf->client_request(); }, asio::detached);
-
+          executor, [sf] { return sf->client_request(); }, asio::detached);
       asio::co_spawn(
-          executor, [sf = shared_from_this()] { return sf->server_response(); }, asio::detached);
+          executor, [sf] { return sf->server_response(); }, asio::detached);
    }
 
    asio::awaitable<void> detect_process_timeout() {
@@ -152,7 +149,6 @@ private:
          if (ec) {
             continue;
          }
-
          // Session from process timeout, maybe process thread dead loop or handle badly,
          // close the session then reconnect for changing another process thread.
          LOG_WARN("session from process timeout, close the session, ident: {}", session_ident_);
@@ -163,21 +159,35 @@ private:
       }
    }
 
-   std::string make_four_tuple() {
+   asio::awaitable<int> four_tuple_2process() {
       nlohmann::json j;
       j["server_ip"] = server_ip_;
       j["server_port"] = server_port_;
       j["client_ip"] = client_ip_;
       j["client_port"] = client_port_;
-      return j.dump();
+
+      auto str = j.dump();
+      uint32_t len = (uint32_t)str.length();
+      auto type = local::data_type::four_tuple;
+      std::vector<asio::const_buffer> write_buffers;
+      write_buffers.emplace_back(asio::buffer(&type, sizeof(type)));
+      write_buffers.emplace_back(asio::buffer(&len, 4));
+      write_buffers.emplace_back(asio::buffer(str.data(), str.length()));
+      auto [ec, _] = co_await asio::async_write(proxy_process_socket_, write_buffers);
+      if (ec) {
+         LOG_ERROR("four_tuple_2process error: {}, ident: {}", ec.message(), session_ident_);
+         co_return -1;
+      }
+      co_return 0;
    }
 
    asio::awaitable<void> connect_process() {
       if (process_connecting_) {
          co_return;
       }
+      process_connecting_ = true;
 
-      LOG_INFO("try to reconnect process, ident: {}", session_ident_);
+      LOG_INFO("try to connect process, ident: {}", session_ident_);
       reset_local_socket();
 #ifndef UDS
       local::tcp_endpoint endpoint(asio::ip::address{}.from_string("127.0.0.1"), local::local_port);
@@ -186,10 +196,9 @@ private:
 #endif
       req_handled_total_pkg_len_ = 0;
       res_handled_total_pkg_len_ = 0;
+      detect_process_timeout_timer_.cancel();
       auto executor = co_await asio::this_coro::executor;
       frequency_timer timer(executor);
-      process_connecting_ = true;
-      detect_process_timeout_timer_.cancel();
 
       for (; !has_closed_;) {
          auto [ec] = co_await proxy_process_socket_.async_connect(endpoint);
@@ -199,27 +208,20 @@ private:
             co_await timer.async_wait();
             continue;
          }
+         LOG_INFO("connect_process ok, ident: {}", session_ident_);
          // Connect process ok, then disable bypass
          bypass_ = false;
          process_connecting_ = false;
+         auto ret = co_await four_tuple_2process();
+         if (ret != 0) [[unlikely]] {
+            co_return;
+         }
 
-         LOG_INFO("connect_process ok, ident: {}", session_ident_);
-         auto str = make_four_tuple();
-         uint32_t len = (uint32_t)str.length();
-         auto type = local::data_type::four_tuple;
-         std::vector<asio::const_buffer> write_buffers;
-         write_buffers.emplace_back(asio::buffer(&type, sizeof(type)));
-         write_buffers.emplace_back(asio::buffer(&len, 4));
-         write_buffers.emplace_back(asio::buffer(str.data(), str.length()));
-         co_await asio::async_write(proxy_process_socket_, write_buffers);
-
+         auto sf = shared_from_this();
          asio::co_spawn(
-             executor,
-             [self = shared_from_this()] { return self->process_2proxy_2client_or_2server(); },
-             asio::detached);
+             executor, [sf] { return sf->process_2proxy_2client_or_2server(); }, asio::detached);
          asio::co_spawn(
-             executor, [sf = shared_from_this()] { return sf->detect_process_timeout(); },
-             asio::detached);
+             executor, [sf] { return sf->detect_process_timeout(); }, asio::detached);
          co_return;
       }
    }
@@ -519,7 +521,9 @@ private:
    }
 
    asio::awaitable<void> client_request() {
+      auto executor = co_await asio::this_coro::executor;
       std::shared_ptr<data_block> block = nullptr;
+
       for (;;) {
          if (eof_) [[unlikely]] {
             LOG_INFO("remote peer (client) close the connection, ident: {}", session_ident_);
@@ -545,16 +549,14 @@ private:
             co_return;
          }
 
-         // ret is -2, proxy write data to process error
+         // Here proxy write data to process error
          ret = co_await enable_bypass_2server();
-         if (ret == 0) [[likely]] {
-            auto executor = co_await asio::this_coro::executor;
-            asio::co_spawn(
-                executor, [sf = shared_from_this()] { return sf->connect_process(); },
-                asio::detached);
-            continue;
+         if (ret == -1) [[unlikely]] {
+            co_return;
          }
-         co_return;
+         asio::co_spawn(
+             executor, [sf = shared_from_this()] { return sf->connect_process(); }, asio::detached);
+         continue;
       }
    }
 
@@ -586,7 +588,9 @@ private:
    }
 
    asio::awaitable<void> server_response() {
+      auto executor = co_await asio::this_coro::executor;
       std::shared_ptr<data_block> block = nullptr;
+
       for (;;) {
          if (eof_) [[unlikely]] {
             LOG_INFO("remote peer (server) close the connection,ident: {}", session_ident_);
@@ -595,14 +599,13 @@ private:
          }
 
          // ***Here bypass, data from server to client
-         // default response_bypass_ is true;
+         // Default response_bypass_ is true, just send head data to process
+         // Ignore the error, if disconnect with process, then client_request will deal.
          if (bypass_ || response_bypass_) {
             if (!bypass_ && response_bypass_) {
-               // if response_bypass_ is true, send empty data to process
                uint8_t head[5];
                head[0] = (uint8_t)local::data_type::from_server_to_client;
                *(uint32_t*)(head + 1) = 0;
-               // Ignore the error, if disconnect with process, then client_request will deal.
                co_await asio::async_write(proxy_process_socket_, asio::buffer(head, 5));
             }
 
@@ -622,16 +625,14 @@ private:
             co_return;
          }
 
-         // ret is -2, proxy write data to process error
+         // Here proxy write data to process error
          ret = co_await enable_bypass_2client();
-         if (ret == 0) [[likely]] {
-            auto executor = co_await asio::this_coro::executor;
-            asio::co_spawn(
-                executor, [sf = shared_from_this()] { return sf->connect_process(); },
-                asio::detached);
-            continue;
+         if (ret == -1) [[unlikely]] {
+            co_return;
          }
-         co_return;
+         asio::co_spawn(
+             executor, [sf = shared_from_this()] { return sf->connect_process(); }, asio::detached);
+         continue;
       }
    }
 };
