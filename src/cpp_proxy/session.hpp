@@ -249,7 +249,7 @@ private:
       return write_buffers;
    }
 
-   void clear_handled_data(std::deque<packet>& stored_data, int handled_pkg_count,
+   void clear_handled_packet(std::deque<packet>& stored_data, int handled_pkg_count,
                            int next_pkg_used_size) {
       for (int i = 0; i < handled_pkg_count; i++) {
          stored_data.pop_front();
@@ -342,7 +342,7 @@ private:
       }
 
       // clear the handled data
-      clear_handled_data(stored_data, handled_pkg_count, next_pkg_used_size);
+      clear_handled_packet(stored_data, handled_pkg_count, next_pkg_used_size);
       co_return 0;
    }
 
