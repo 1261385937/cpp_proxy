@@ -96,8 +96,7 @@ private:
    }
 
    asio::awaitable<void> setup() {
-      LOG_INFO("setup");
-      size_t count = 0;
+      //size_t count = 0;
       for (;;) {
          if (eof_) [[unlikely]] {
             LOG_ERROR("remote peer close the connection");
@@ -123,13 +122,12 @@ private:
          if (body_len > buf_.size()) [[unlikely]] {
             buf_.resize(body_len);
          }
-         count++;
-         LOG_INFO("head:{} body_len: {} count:{}", type, body_len, count);
-        
+
+         /*LOG_INFO("head:{} body_len: {} count:{}", type, body_len, ++count);
          if (count % 100 == 0) {
             using namespace std::chrono_literals;
             std::this_thread::sleep_for(10s);
-         }
+         }*/
 
          // body_len is 0 when response_bypass_ is true by default
          if (body_len != 0) {

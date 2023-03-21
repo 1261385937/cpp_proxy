@@ -128,8 +128,8 @@ private:
       client_port_ = proxy_client_socket_.remote_endpoint().port();
       auto proxy_ip = proxy_client_socket_.local_endpoint().address().to_string();
       auto proxy_port = proxy_client_socket_.local_endpoint().port();
-      session_ident_ = client_ip_ + ":" + std::to_string(client_port_) + " -- " + proxy_ip + ":" +
-                       std::to_string(proxy_port) + " -- " + server_ip_ + ":" +
+      session_ident_ = client_ip_ + ":" + std::to_string(client_port_) + "--" + proxy_ip + ":" +
+                       std::to_string(proxy_port) + "--" + server_ip_ + ":" +
                        std::to_string(server_port_);
 
       auto sf = shared_from_this();
@@ -264,7 +264,7 @@ private:
    }
 
    asio::awaitable<int> inner_enable_bypass(std::deque<packet>& stored_data, tcp_socket& socket,
-                                            const std::string& direction) {
+                                            std::string_view direction) {
       if (!bypass_) {
          bypass_ = true;
          LOG_WARN("enable bypass. ident: {}", session_ident_);
@@ -306,7 +306,7 @@ private:
                                                        std::deque<packet>& stored_data,
                                                        uint64_t& handled_total_pkg_len,
                                                        tcp_socket& socket,
-                                                       const std::string& direction) {
+                                                       std::string_view direction) {
       // Process make a new data (rewrite or create), transfer the new data
       if (head->new_data_len != 0) {
          auto [ec, _] = co_await asio::async_write(
@@ -364,7 +364,7 @@ private:
                                                                std::deque<packet>& stored_data,
                                                                tcp_socket& socket,
                                                                local::data_type type,
-                                                               const std::string& direction) {
+                                                               std::string_view direction) {
       // Prepare data_block if available size < 64+5 byte, head_len is 5
       // For head(1 + 4) byte
       if (!block || block->get_available() < 69) {
@@ -415,55 +415,51 @@ private:
           local::data_type::from_server_to_client, "from server");
    }
 
+   asio::awaitable<int> process_2proxy(char* buf, size_t len, std::string_view target) {
+      auto executor = co_await asio::this_coro::executor;
+      auto [rec, r_] = co_await asio::async_read(proxy_process_socket_, asio::buffer(buf, len));
+      if (rec) [[unlikely]] {
+         if (has_closed_) {
+            co_return -1;
+         }
+         LOG_ERROR("async_read {} from process error: {}, ident: {}", target, rec.message(),
+                   session_ident_);
+         co_await enable_bypass_2server();
+         co_await enable_bypass_2client();
+         asio::co_spawn(
+             executor, [sf = shared_from_this()] { return sf->connect_process(); }, asio::detached);
+         co_return -1;
+      }
+      co_return 0;
+   }
+
    asio::awaitable<void> process_2proxy_2client_or_2server() {
       LOG_WARN("setup process_2proxy_2client_or_2server, ident: {}", session_ident_);
       auto executor = co_await asio::this_coro::executor;
+      std::string proxy_process_buf;
 
       // Proxy read data from process
       for (;;) {
          //**Read head
          char head_buf[local::response_head_len];
-         auto [rec, r_] = co_await asio::async_read(
-             proxy_process_socket_, asio::buffer(head_buf, local::response_head_len));
-         if (rec) [[unlikely]] {
-            if (has_closed_) {
-               co_return;
-            }
-            LOG_ERROR("async_read head from process error: {}, ident: {}", rec.message(),
-                      session_ident_);
-            co_await enable_bypass_2server();
-            co_await enable_bypass_2client();
-            asio::co_spawn(
-                executor, [sf = shared_from_this()] { return sf->connect_process(); },
-                asio::detached);
+         auto ret = co_await process_2proxy(head_buf, local::response_head_len, "head");
+         if (ret == -1) {
             co_return;
          }
          auto head = (local::response_head*)head_buf;
 
-         if (head->type != local::data_type::heartbeat) {
+         /*if (head->type != local::data_type::heartbeat) {
             LOG_INFO("head:{} body_len: {}", head->type, head->new_data_len);
-         }
+         }*/
 
          //**Read body if has
-         std::string proxy_process_buf;
          auto body_len = head->new_data_len;
          if (body_len != 0) [[unlikely]] {
             if (body_len > proxy_process_buf.size()) {
                proxy_process_buf.resize(body_len);
             }
-            auto [ec, _] = co_await asio::async_read(
-                proxy_process_socket_, asio::buffer(proxy_process_buf.data(), body_len));
-            if (ec) [[unlikely]] {
-               if (has_closed_) {
-                  co_return;
-               }
-               LOG_ERROR("async_read body from process error: {}, ident: {}", ec.message(),
-                         session_ident_);
-               co_await enable_bypass_2server();
-               co_await enable_bypass_2client();
-               asio::co_spawn(
-                   executor, [sf = shared_from_this()] { return sf->connect_process(); },
-                   asio::detached);
+            ret = co_await process_2proxy(proxy_process_buf.data(), body_len, "body");
+            if (ret == -1) {
                co_return;
             }
          }
@@ -471,13 +467,13 @@ private:
          switch (head->type) {
             using enum local::data_type;
             case from_client_to_server: {
-               auto ret = co_await proxy_2server(head, proxy_process_buf);
+               ret = co_await proxy_2server(head, proxy_process_buf);
                if (ret == -1) [[unlikely]] {
                   co_return;
                }
             } break;
             case from_server_to_client: {
-               auto ret = co_await proxy_2client(head, proxy_process_buf);
+               ret = co_await proxy_2client(head, proxy_process_buf);
                if (ret == -1) [[unlikely]] {
                   co_return;
                }
