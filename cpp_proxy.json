@@ -7,7 +7,6 @@
   "tcp_proxy": [
     {
       "listen_port": 9005,
-      "listen_ip": "127.0.0.1",
       "servers": [
         {
           "ip": "127.0.0.1",
@@ -35,6 +34,24 @@
         {
           "ip": "127.0.0.1",
           "port": 27017,
+          "conn_buf_size": 131072,
+          "response_bypass": true
+        }
+      ]
+    },
+    {
+      "listen_port": 9007,
+      "listen_ip": "127.0.0.1",
+      "servers": [
+        {
+          "ip": "127.0.0.1",
+          "port": 3306,
+          "conn_buf_size": 131072,
+          "response_bypass": true
+        },
+        {
+          "ip": "127.0.0.1",
+          "port": 3306,
           "conn_buf_size": 131072,
           "response_bypass": true
         }
