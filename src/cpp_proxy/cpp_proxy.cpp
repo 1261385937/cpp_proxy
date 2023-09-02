@@ -33,6 +33,7 @@ inline asio::awaitable<void> listener(uint16_t listen_port, std::string_view lis
       acceptor = std::make_shared<tcp_acceptor>(executor,
                                                 asio::ip::tcp::endpoint{ip_address, listen_port});
    }
+   acceptor->listen(2048);
    acceptor->set_option(tcp::acceptor::reuse_address(true), ecode);
    acceptors.emplace(listen_port, acceptor);
 
@@ -43,6 +44,8 @@ inline asio::awaitable<void> listener(uint16_t listen_port, std::string_view lis
          if (!acceptor->is_open()) {
             co_return;
          }
+         LOG_ERROR("async_accept exception:{}", ec.message());
+         continue;
       }
       std::make_shared<cpp_proxy::session>(std::move(client_proxy_socket))->start();
    }
